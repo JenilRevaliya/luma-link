@@ -14,6 +14,7 @@ import { ColorCalibrator } from '../calibration/color-calib';
 export interface PipelineResult {
   state: 'SEARCHING' | 'FOUND' | 'CALIBRATING' | 'RECEIVING';
   corners: QuadCorners | null;
+  matrixCorners: QuadCorners | null;
   homography: Homography | null;
   decodedFrame: DecodedFrame | null;
   cellColors: RGBColor[] | null;
@@ -41,21 +42,27 @@ export class VisionPipeline {
    */
   public processFrame(
     imgData: ImageData,
-    overrideCorners?: QuadCorners | null
+    overrideCorners?: QuadCorners | null,
+    searchBounds?: { x: number; y: number; width: number; height: number }
   ): PipelineResult {
     let corners: QuadCorners | null = overrideCorners || null;
+    let matrixCorners: QuadCorners | null = null;
 
     if (!corners) {
-      const det = CornerFinder.findCorners(imgData);
+      const det = CornerFinder.findCorners(imgData, searchBounds);
       if (det) {
         corners = det.corners;
+        matrixCorners = det.matrixCorners;
       }
+    } else {
+      matrixCorners = CornerFinder.computeMatrixCorners(corners);
     }
 
     if (!corners) {
       return {
         state: 'SEARCHING',
         corners: null,
+        matrixCorners: null,
         homography: null,
         decodedFrame: null,
         cellColors: null,
@@ -87,6 +94,7 @@ export class VisionPipeline {
       return {
         state: 'SEARCHING',
         corners,
+        matrixCorners,
         homography: null,
         decodedFrame: null,
         cellColors: null,
@@ -147,6 +155,10 @@ export class VisionPipeline {
         this.calibrator.updateCalibration(patches.black, patches.red, patches.green, patches.blue);
       } else {
         state = 'RECEIVING';
+        // Auto-calibrate dynamically from verified cell colors
+        if (cellColors && !this.calibrator.isCalibrated) {
+          this.calibrator.autoCalibrateFromDecodedGrid(cellColors, gridSymbols);
+        }
       }
     } else {
       this.consecutiveLocks = Math.max(0, this.consecutiveLocks - 1);
@@ -157,6 +169,7 @@ export class VisionPipeline {
     return {
       state,
       corners,
+      matrixCorners,
       homography: H,
       decodedFrame,
       cellColors,

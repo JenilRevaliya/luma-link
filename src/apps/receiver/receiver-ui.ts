@@ -8,7 +8,7 @@ import { VisionPipeline } from '../../packages/decoder/vision-pipeline';
 import { ColorCalibrator } from '../../packages/calibration/color-calib';
 import { PacketReassembler, type ReassembledResult, type ReassemblyProgress } from '../../packages/decoder/reassembler';
 import { soundManager } from '../../components/audio-cues';
-import type { QuadCorners } from '../../packages/protocol/types';
+import type { Point2D, QuadCorners } from '../../packages/protocol/types';
 
 export class ReceiverApp {
   private container: HTMLElement;
@@ -350,8 +350,54 @@ export class ReceiverApp {
 
     if (!imgData) return;
 
+    // Calculate targeting reticle bounds in camera image coordinates
+    let searchBounds: { x: number; y: number; width: number; height: number } | undefined = undefined;
+    const viewportWrapper = this.container.querySelector('.camera-viewport-wrapper') as HTMLElement | null;
+    const reticleEl = this.container.querySelector('#targeting-reticle') as HTMLElement | null;
+
+    if (viewportWrapper && reticleEl && !overrideCorners) {
+      const vw = this.cameraCanvas.width;
+      const vh = this.cameraCanvas.height;
+      const wrapperRect = viewportWrapper.getBoundingClientRect();
+      const reticleRect = reticleEl.getBoundingClientRect();
+
+      if (wrapperRect.width > 0 && wrapperRect.height > 0) {
+        const videoAspect = vw / vh;
+        const wrapperAspect = wrapperRect.width / wrapperRect.height;
+        let displayedW: number;
+        let displayedH: number;
+        let displayedL: number;
+        let displayedT: number;
+
+        if (wrapperAspect > videoAspect) {
+          displayedH = wrapperRect.height;
+          displayedW = displayedH * videoAspect;
+          displayedL = (wrapperRect.width - displayedW) / 2;
+          displayedT = 0;
+        } else {
+          displayedW = wrapperRect.width;
+          displayedH = displayedW / videoAspect;
+          displayedL = 0;
+          displayedT = (wrapperRect.height - displayedH) / 2;
+        }
+
+        const scale = vw / displayedW;
+        const rx = (reticleRect.left - (wrapperRect.left + displayedL)) * scale;
+        const ry = (reticleRect.top - (wrapperRect.top + displayedT)) * scale;
+        const rw = reticleRect.width * scale;
+        const rh = reticleRect.height * scale;
+
+        searchBounds = {
+          x: Math.round(rx),
+          y: Math.round(ry),
+          width: Math.round(rw),
+          height: Math.round(rh),
+        };
+      }
+    }
+
     // Run Vision Pipeline
-    const result = this.pipeline.processFrame(imgData, overrideCorners);
+    const result = this.pipeline.processFrame(imgData, overrideCorners, searchBounds);
 
     // Update state badge & channel indicator
     this.updateStateUI(result.state, result.decodedFrame !== null);
@@ -360,8 +406,8 @@ export class ReceiverApp {
     (this.container.querySelector('#metric-calibrated') as HTMLElement).textContent = this.calibrator.isCalibrated ? 'YES' : 'PENDING';
     (this.container.querySelector('#metric-confidence') as HTMLElement).textContent = `${Math.round(result.averageConfidence * 100)}%`;
 
-    // Draw reticle tracking overlay
-    this.drawReticleOverlay(result.corners);
+    // Draw reticle tracking overlay (framed around matrixCorners)
+    this.drawReticleOverlay(result.corners, result.matrixCorners);
 
     // If valid frame was decoded, update live telemetry and ingest
     if (result.decodedFrame) {
@@ -375,7 +421,7 @@ export class ReceiverApp {
     }
   }
 
-  private drawReticleOverlay(corners: QuadCorners | null): void {
+  private drawReticleOverlay(corners: QuadCorners | null, matrixCorners: QuadCorners | null): void {
     const ctx = this.reticleCanvas.getContext('2d');
     if (!ctx) return;
 
@@ -390,25 +436,62 @@ export class ReceiverApp {
 
     (this.container.querySelector('#targeting-reticle') as HTMLElement).classList.add('locked');
 
-    // Draw polygon connecting detected corners
+    // 1. Draw glowing green box framed tightly around the 16x16 color matrix
+    const m = matrixCorners || corners;
+    ctx.save();
     ctx.strokeStyle = '#00e676';
     ctx.lineWidth = 3;
+    ctx.shadowColor = 'rgba(0, 230, 118, 0.6)';
+    ctx.shadowBlur = 8;
     ctx.beginPath();
-    ctx.moveTo(corners.topLeft.x, corners.topLeft.y);
-    ctx.lineTo(corners.topRight.x, corners.topRight.y);
-    ctx.lineTo(corners.bottomRight.x, corners.bottomRight.y);
-    ctx.lineTo(corners.bottomLeft.x, corners.bottomLeft.y);
+    ctx.moveTo(m.topLeft.x, m.topLeft.y);
+    ctx.lineTo(m.topRight.x, m.topRight.y);
+    ctx.lineTo(m.bottomRight.x, m.bottomRight.y);
+    ctx.lineTo(m.bottomLeft.x, m.bottomLeft.y);
     ctx.closePath();
     ctx.stroke();
 
-    // Corner target circles
-    const pts = [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft];
-    pts.forEach((p, idx) => {
-      ctx.fillStyle = idx === 0 ? '#00e5ff' : '#00e676';
+    // Subtle matrix fill
+    ctx.fillStyle = 'rgba(0, 230, 118, 0.05)';
+    ctx.fill();
+
+    // 2. Corner HUD brackets on matrix boundary
+    const drawBracket = (p: Point2D, dirX: number, dirY: number) => {
+      const len = 14;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+      ctx.moveTo(p.x + dirX * len, p.y);
+      ctx.lineTo(p.x, p.y);
+      ctx.lineTo(p.x, p.y + dirY * len);
+      ctx.strokeStyle = '#00e5ff';
+      ctx.lineWidth = 3.5;
+      ctx.stroke();
+    };
+    drawBracket(m.topLeft, 1, 1);
+    drawBracket(m.topRight, -1, 1);
+    drawBracket(m.bottomRight, -1, -1);
+    drawBracket(m.bottomLeft, 1, -1);
+
+    // 3. Draw Outer Fiducial Target Bullseyes
+    const fiducials = [
+      { pt: corners.topLeft, color: '#00e5ff' },     // Top-Left (distinct cyan)
+      { pt: corners.topRight, color: '#00e676' },    // Top-Right
+      { pt: corners.bottomRight, color: '#00e676' }, // Bottom-Right
+      { pt: corners.bottomLeft, color: '#00e676' },  // Bottom-Left
+    ];
+
+    for (const f of fiducials) {
+      ctx.strokeStyle = f.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(f.pt.x, f.pt.y, 8, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = f.color;
+      ctx.beginPath();
+      ctx.arc(f.pt.x, f.pt.y, 3.5, 0, Math.PI * 2);
       ctx.fill();
-    });
+    }
+    ctx.restore();
   }
 
   private updateStateUI(state: string, isTransmitting: boolean): void {
