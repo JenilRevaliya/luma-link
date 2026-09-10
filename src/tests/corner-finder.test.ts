@@ -123,4 +123,233 @@ describe('CornerFinder & Optical Calibration', () => {
     const result = CornerFinder.findCorners(imgData);
     expect(result).toBeNull();
   });
+
+  it('detects 4 QR 1:1:3:1:1 square finder patterns with sub-pixel accuracy', () => {
+    CornerFinder.reset();
+    const width = 600;
+    const height = 600;
+    const buffer = new Uint8ClampedArray(width * height * 4);
+
+    // Dark background (#0a0a0f)
+    for (let i = 0; i < buffer.length; i += 4) {
+      buffer[i] = 10;
+      buffer[i + 1] = 10;
+      buffer[i + 2] = 15;
+      buffer[i + 3] = 255;
+    }
+
+    // Helper to draw 7x7 nested square finder pattern (M = 8px)
+    const drawFiducial = (cx: number, cy: number, isTL: boolean) => {
+      const M = 8;
+      const halfW = 3.5 * M; // 28
+      // 1. Outer 7x7 White box
+      for (let y = cy - halfW; y < cy + halfW; y++) {
+        for (let x = cx - halfW; x < cx + halfW; x++) {
+          if (x >= 0 && x < width && y >= 0 && y < height) {
+            const idx = (y * width + x) * 4;
+            buffer[idx] = 255;
+            buffer[idx + 1] = 255;
+            buffer[idx + 2] = 255;
+          }
+        }
+      }
+      // 2. Inner 5x5 Dark box
+      const halfDark = 2.5 * M; // 20
+      for (let y = cy - halfDark; y < cy + halfDark; y++) {
+        for (let x = cx - halfDark; x < cx + halfDark; x++) {
+          if (x >= 0 && x < width && y >= 0 && y < height) {
+            const idx = (y * width + x) * 4;
+            buffer[idx] = 10;
+            buffer[idx + 1] = 10;
+            buffer[idx + 2] = 15;
+          }
+        }
+      }
+      // 3. Core 3x3 box
+      const halfCore = 1.5 * M; // 12
+      for (let y = cy - halfCore; y < cy + halfCore; y++) {
+        for (let x = cx - halfCore; x < cx + halfCore; x++) {
+          if (x >= 0 && x < width && y >= 0 && y < height) {
+            const idx = (y * width + x) * 4;
+            if (isTL) {
+              buffer[idx] = 0;
+              buffer[idx + 1] = 240;
+              buffer[idx + 2] = 255; // Cyan
+            } else {
+              buffer[idx] = 255;
+              buffer[idx + 1] = 255;
+              buffer[idx + 2] = 255; // White
+            }
+          }
+        }
+      }
+    };
+
+    // Draw fiducials at inset 0.09 (54, 546)
+    const inset = 0.09;
+    const tl = { x: Math.round(width * inset), y: Math.round(height * inset) };
+    const tr = { x: Math.round(width * (1 - inset)), y: Math.round(height * inset) };
+    const br = { x: Math.round(width * (1 - inset)), y: Math.round(height * (1 - inset)) };
+    const bl = { x: Math.round(width * inset), y: Math.round(height * (1 - inset)) };
+
+    drawFiducial(tl.x, tl.y, true);
+    drawFiducial(tr.x, tr.y, false);
+    drawFiducial(br.x, br.y, false);
+    drawFiducial(bl.x, bl.y, false);
+
+    const imgData = { width, height, data: buffer } as ImageData;
+    const res = CornerFinder.findCorners(imgData);
+
+    expect(res).not.toBeNull();
+    expect(res!.confidence).toBeGreaterThan(0.85);
+    expect(res!.isDirectLock).toBe(true);
+
+    // Verify corners match within 3px of true fiducial centers
+    expect(Math.abs(res!.corners.topLeft.x - tl.x)).toBeLessThan(4);
+    expect(Math.abs(res!.corners.topLeft.y - tl.y)).toBeLessThan(4);
+    expect(Math.abs(res!.corners.topRight.x - tr.x)).toBeLessThan(4);
+    expect(Math.abs(res!.corners.topRight.y - tr.y)).toBeLessThan(4);
+    expect(Math.abs(res!.corners.bottomRight.x - br.x)).toBeLessThan(4);
+    expect(Math.abs(res!.corners.bottomRight.y - br.y)).toBeLessThan(4);
+    expect(Math.abs(res!.corners.bottomLeft.x - bl.x)).toBeLessThan(4);
+    expect(Math.abs(res!.corners.bottomLeft.y - bl.y)).toBeLessThan(4);
+  });
+
+  it('extrapolates missing 4th corner via affine reconstruction when one corner is blinded', () => {
+    CornerFinder.reset();
+    const width = 600;
+    const height = 600;
+    const buffer = new Uint8ClampedArray(width * height * 4);
+
+    // Dark background (#0a0a0f)
+    for (let i = 0; i < buffer.length; i += 4) {
+      buffer[i] = 10;
+      buffer[i + 1] = 10;
+      buffer[i + 2] = 15;
+      buffer[i + 3] = 255;
+    }
+
+    const drawFiducial = (cx: number, cy: number, isTL: boolean) => {
+      const M = 8;
+      const halfW = 3.5 * M;
+      for (let y = cy - halfW; y < cy + halfW; y++) {
+        for (let x = cx - halfW; x < cx + halfW; x++) {
+          if (x >= 0 && x < width && y >= 0 && y < height) {
+            const idx = (y * width + x) * 4;
+            buffer[idx] = 255; buffer[idx + 1] = 255; buffer[idx + 2] = 255;
+          }
+        }
+      }
+      const halfDark = 2.5 * M;
+      for (let y = cy - halfDark; y < cy + halfDark; y++) {
+        for (let x = cx - halfDark; x < cx + halfDark; x++) {
+          if (x >= 0 && x < width && y >= 0 && y < height) {
+            const idx = (y * width + x) * 4;
+            buffer[idx] = 10; buffer[idx + 1] = 10; buffer[idx + 2] = 15;
+          }
+        }
+      }
+      const halfCore = 1.5 * M;
+      for (let y = cy - halfCore; y < cy + halfCore; y++) {
+        for (let x = cx - halfCore; x < cx + halfCore; x++) {
+          if (x >= 0 && x < width && y >= 0 && y < height) {
+            const idx = (y * width + x) * 4;
+            if (isTL) {
+              buffer[idx] = 0; buffer[idx + 1] = 240; buffer[idx + 2] = 255;
+            } else {
+              buffer[idx] = 255; buffer[idx + 1] = 255; buffer[idx + 2] = 255;
+            }
+          }
+        }
+      }
+    };
+
+    const inset = 0.09;
+    const tl = { x: Math.round(width * inset), y: Math.round(height * inset) };
+    const tr = { x: Math.round(width * (1 - inset)), y: Math.round(height * inset) };
+    const br = { x: Math.round(width * (1 - inset)), y: Math.round(height * (1 - inset)) };
+    const bl = { x: Math.round(width * inset), y: Math.round(height * (1 - inset)) };
+
+    // Only draw TL, TR, BL (BR is missing / blinded by glare)
+    drawFiducial(tl.x, tl.y, true);
+    drawFiducial(tr.x, tr.y, false);
+    drawFiducial(bl.x, bl.y, false);
+
+    const imgData = { width, height, data: buffer } as ImageData;
+    const res = CornerFinder.findCorners(imgData);
+
+    expect(res).not.toBeNull();
+    // Reconstructed BR should be close to true BR
+    expect(Math.abs(res!.corners.bottomRight.x - br.x)).toBeLessThan(6);
+    expect(Math.abs(res!.corners.bottomRight.y - br.y)).toBeLessThan(6);
+  });
+
+  it('maintains lock across consecutive blurred frames via temporal hysteresis', () => {
+    CornerFinder.reset();
+    const width = 600;
+    const height = 600;
+    const clearBuffer = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < clearBuffer.length; i += 4) {
+      clearBuffer[i] = 10; clearBuffer[i + 1] = 10; clearBuffer[i + 2] = 15; clearBuffer[i + 3] = 255;
+    }
+
+    const drawFiducial = (cx: number, cy: number, isTL: boolean) => {
+      const M = 8;
+      const halfW = 3.5 * M;
+      for (let y = cy - halfW; y < cy + halfW; y++) {
+        for (let x = cx - halfW; x < cx + halfW; x++) {
+          if (x >= 0 && x < width && y >= 0 && y < height) {
+            const idx = (y * width + x) * 4;
+            clearBuffer[idx] = 255; clearBuffer[idx + 1] = 255; clearBuffer[idx + 2] = 255;
+          }
+        }
+      }
+      const halfDark = 2.5 * M;
+      for (let y = cy - halfDark; y < cy + halfDark; y++) {
+        for (let x = cx - halfDark; x < cx + halfDark; x++) {
+          if (x >= 0 && x < width && y >= 0 && y < height) {
+            const idx = (y * width + x) * 4;
+            clearBuffer[idx] = 10; clearBuffer[idx + 1] = 10; clearBuffer[idx + 2] = 15;
+          }
+        }
+      }
+      const halfCore = 1.5 * M;
+      for (let y = cy - halfCore; y < cy + halfCore; y++) {
+        for (let x = cx - halfCore; x < cx + halfCore; x++) {
+          if (x >= 0 && x < width && y >= 0 && y < height) {
+            const idx = (y * width + x) * 4;
+            if (isTL) {
+              clearBuffer[idx] = 0; clearBuffer[idx + 1] = 240; clearBuffer[idx + 2] = 255;
+            } else {
+              clearBuffer[idx] = 255; clearBuffer[idx + 1] = 255; clearBuffer[idx + 2] = 255;
+            }
+          }
+        }
+      }
+    };
+
+    const inset = 0.09;
+    drawFiducial(Math.round(width * inset), Math.round(height * inset), true);
+    drawFiducial(Math.round(width * (1 - inset)), Math.round(height * inset), false);
+    drawFiducial(Math.round(width * (1 - inset)), Math.round(height * (1 - inset)), false);
+    drawFiducial(Math.round(width * inset), Math.round(height * (1 - inset)), false);
+
+    const goodImg = { width, height, data: clearBuffer } as ImageData;
+    // Step 1: establish lock
+    const lockRes = CornerFinder.findCorners(goodImg);
+    expect(lockRes).not.toBeNull();
+    expect(lockRes!.isDirectLock).toBe(true);
+
+    // Step 2: Feed completely empty/black frames (simulating motion blur)
+    const blurBuffer = new Uint8ClampedArray(width * height * 4); // All zeros
+    const blurImg = { width, height, data: blurBuffer } as ImageData;
+
+    // Frames 1..10 should retain lock without dropping to null!
+    for (let f = 0; f < 10; f++) {
+      const blurredRes = CornerFinder.findCorners(blurImg);
+      expect(blurredRes).not.toBeNull();
+      expect(blurredRes!.confidence).toBeGreaterThan(0.75);
+      expect(blurredRes!.isDirectLock).toBe(false);
+    }
+  });
 });

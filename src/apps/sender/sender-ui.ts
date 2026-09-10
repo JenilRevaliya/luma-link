@@ -20,13 +20,13 @@ export class SenderApp {
   // Photo state
   private currentImage: HTMLImageElement | HTMLCanvasElement | null = null;
   private cropMode: CropMode = 'center-crop';
-  private targetResolution = 192;
+  private targetResolution = 128;
   private quality = 0.72;
 
   // Text state
   private currentText = '';
 
-  private fps = 10;
+  private fps = 12;
   private preparedStream: PreparedStream | null = null;
   private currentFrameIndex = 0;
   private loopCount = 1;
@@ -91,10 +91,10 @@ export class SenderApp {
               <div class="control-group">
                 <label class="control-label">Resolution Preset</label>
                 <select class="select-input" id="resolution-select">
-                  <option value="128">128 × 128 (Ultra-Fast ~2KB, ~4s)</option>
-                  <option value="192" selected>192 × 192 (Standard ~5KB, ~10s)</option>
-                  <option value="256">256 × 256 (Detailed ~12KB, ~25s)</option>
-                  <option value="384">384 × 384 (High-Res ~25KB, ~50s)</option>
+                  <option value="128" selected>128 × 128 (Ultra-Fast ~2KB, ~3s)</option>
+                  <option value="192">192 × 192 (Standard ~5KB, ~8s)</option>
+                  <option value="256">256 × 256 (Detailed ~12KB, ~20s)</option>
+                  <option value="384">384 × 384 (High-Res ~25KB, ~45s)</option>
                 </select>
               </div>
 
@@ -151,10 +151,10 @@ export class SenderApp {
               </div>
               <input type="range" class="range-slider" id="fps-slider" min="4" max="30" value="${this.fps}" step="1" />
               <div class="presets-row" style="margin-top: 0.4rem;">
-                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="5">5 FPS (Reliable)</button>
-                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="10">10 FPS (Standard)</button>
-                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="15">15 FPS</button>
-                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="24">24 FPS</button>
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="8">8 FPS</button>
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="12">12 FPS (Optimal)</button>
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="15">15 FPS (Turbo)</button>
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="20">20 FPS (Max)</button>
               </div>
             </div>
 
@@ -671,10 +671,11 @@ export class SenderApp {
     // Advance frame index
     this.currentFrameIndex++;
     if (this.currentFrameIndex >= this.preparedStream.frames.length) {
-      this.currentFrameIndex = 0;
+      const resumeIdx = this.preparedStream.loopStartIndex ?? 0;
+      this.currentFrameIndex = resumeIdx;
       this.loopCount++;
       (this.container.querySelector('#loop-badge') as HTMLElement).textContent = `LOOP ${this.loopCount}`;
-      debugLogger.info('TX', `Completed stream loop #${this.loopCount - 1}. Looping back to frame 0.`);
+      debugLogger.info('TX', `Completed stream loop #${this.loopCount - 1}. Looping to packet stream frame #${resumeIdx} (skipping redundant discovery/calibration).`);
       debugLogger.updateSenderTelemetry({ loopCount: this.loopCount });
     }
   }

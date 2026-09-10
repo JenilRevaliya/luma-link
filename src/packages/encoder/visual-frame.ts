@@ -58,9 +58,9 @@ export class VisualFrameRenderer {
     ctx.fillStyle = '#0a0a0f';
     ctx.fillRect(0, 0, size, size);
 
-    // 2. Draw 4 Corner Fiducial Markers
+    // 2. Draw 4 Corner QR-Style Fiducial Markers (7x7 modules, 1:1:3:1:1 ratio)
     const fiducials = VisualFrameRenderer.getFiducialCenters();
-    VisualFrameRenderer.drawFiducial(ctx, fiducials.topLeft, size, true); // TL has unique orientation anchor
+    VisualFrameRenderer.drawFiducial(ctx, fiducials.topLeft, size, true); // TL has unique cyan orientation anchor
     VisualFrameRenderer.drawFiducial(ctx, fiducials.topRight, size, false);
     VisualFrameRenderer.drawFiducial(ctx, fiducials.bottomRight, size, false);
     VisualFrameRenderer.drawFiducial(ctx, fiducials.bottomLeft, size, false);
@@ -94,7 +94,9 @@ export class VisualFrameRenderer {
   }
 
   /**
-   * Draws a concentric multi-ring fiducial marker
+   * Draws a standard QR-style 7x7 module nested square finder pattern
+   * Ratio along any horizontal, vertical, or diagonal scanline through center:
+   * 1 White : 1 Dark : 3 Center (White/Cyan) : 1 Dark : 1 White  (1:1:3:1:1)
    */
   private static drawFiducial(
     ctx: CanvasRenderingContext2D,
@@ -102,36 +104,23 @@ export class VisualFrameRenderer {
     canvasSize: number,
     isTopLeft: boolean
   ): void {
-    const cx = centerFrac.x * canvasSize;
-    const cy = centerFrac.y * canvasSize;
-    const rOuter = canvasSize * 0.055;
-    const rMid = canvasSize * 0.038;
-    const rInner = canvasSize * 0.022;
+    const cx = Math.round(centerFrac.x * canvasSize);
+    const cy = Math.round(centerFrac.y * canvasSize);
 
-    // Outer white ring
+    // Module size M: 7 modules wide total = ~10.5% of canvasSize
+    const M = Math.max(2, Math.round(canvasSize * 0.015));
+    const halfW = 3.5 * M;
+
+    // 1. Outer 7x7 module square (White)
     ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(cx, cy, rOuter, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(cx - halfW, cy - halfW, 7 * M, 7 * M);
 
-    // Dark ring
+    // 2. Inner 5x5 module square (Dark background)
     ctx.fillStyle = '#0a0a0f';
-    ctx.beginPath();
-    ctx.arc(cx, cy, rMid, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(cx - 2.5 * M, cy - 2.5 * M, 5 * M, 5 * M);
 
-    // Center bullseye
-    ctx.fillStyle = isTopLeft ? '#00f0ff' : '#ffffff'; // Unique cyan tint for TL orientation
-    ctx.beginPath();
-    ctx.arc(cx, cy, rInner, 0, Math.PI * 2);
-    ctx.fill();
-
-    if (isTopLeft) {
-      // Inner dark dot for TL anchor
-      ctx.fillStyle = '#0a0a0f';
-      ctx.beginPath();
-      ctx.arc(cx, cy, rInner * 0.45, 0, Math.PI * 2);
-      ctx.fill();
-    }
+    // 3. Center 3x3 module core (Cyan for TL anchor, White for TR/BR/BL)
+    ctx.fillStyle = isTopLeft ? '#00f0ff' : '#ffffff';
+    ctx.fillRect(cx - 1.5 * M, cy - 1.5 * M, 3 * M, 3 * M);
   }
 }

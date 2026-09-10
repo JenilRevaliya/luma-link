@@ -5,6 +5,7 @@
  */
 
 import { VisionPipeline } from '../../packages/decoder/vision-pipeline';
+import { CornerFinder } from '../../packages/decoder/corner-finder';
 import { ColorCalibrator } from '../../packages/calibration/color-calib';
 import { PacketReassembler, type ReassembledResult, type ReassemblyProgress } from '../../packages/decoder/reassembler';
 import { soundManager } from '../../components/audio-cues';
@@ -453,10 +454,11 @@ export class ReceiverApp {
         const rw = reticleRect.width * scale;
         const rh = reticleRect.height * scale;
 
-        const clampedX = Math.max(0, Math.min(vw - 20, Math.round(rx)));
-        const clampedY = Math.max(0, Math.min(vh - 20, Math.round(ry)));
-        const clampedW = Math.min(vw - clampedX, Math.max(20, Math.round(rw)));
-        const clampedH = Math.min(vh - clampedY, Math.max(20, Math.round(rh)));
+        const pad = Math.round(Math.min(rw, rh) * 0.25);
+        const clampedX = Math.max(0, Math.min(vw - 20, Math.round(rx - pad)));
+        const clampedY = Math.max(0, Math.min(vh - 20, Math.round(ry - pad)));
+        const clampedW = Math.min(vw - clampedX, Math.max(20, Math.round(rw + 2 * pad)));
+        const clampedH = Math.min(vh - clampedY, Math.max(20, Math.round(rh + 2 * pad)));
 
         searchBounds = {
           x: clampedX,
@@ -803,6 +805,7 @@ export class ReceiverApp {
   }
 
   public resetState(): void {
+    CornerFinder.reset();
     this.calibrator.reset();
     this.reassembler.reset();
     (this.container.querySelector('#rx-packet-count') as HTMLElement).textContent = '0 / 0 (0%)';

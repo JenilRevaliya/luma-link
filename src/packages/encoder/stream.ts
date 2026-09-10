@@ -33,6 +33,7 @@ export interface PreparedStream {
     rawBytes: Uint8Array;
     cellGrid: Uint8Array;
   }[];
+  loopStartIndex: number; // Frame index to resume from on loops 2+ (skips discovery/calibration)
 }
 
 export class PacketStreamGenerator {
@@ -171,6 +172,7 @@ export class PacketStreamGenerator {
       totalBytes: source.data.length,
       mimeType: source.mimeType,
       frames,
+      loopStartIndex: 2, // Frame 2 is START metadata, skipping redundant discovery and calibration on loops 2+
     };
   }
 }
