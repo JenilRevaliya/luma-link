@@ -28,8 +28,8 @@ export class CornerFinder {
   ): DetectionResult | null {
     const { width, height, data } = imgData;
 
-    // 1. Establish central alignment square in the camera viewport
-    const squareDim = Math.round(Math.min(width, height) * 0.70);
+    // 1. Target search area
+    const squareDim = Math.round(Math.min(width, height) * 0.72);
     const centerX = Math.round(width / 2);
     const centerY = Math.round(height / 2);
 
@@ -46,27 +46,23 @@ export class CornerFinder {
     const sw = Math.min(width - sx, bounds.width);
     const sh = Math.min(height - sy, bounds.height);
 
-    // 2. Search for the 4 corner fiducials in the 4 corner quadrants of the target area
+    if (sw < 40 || sh < 40) return null;
+
     const fiducialInset = VisualFrameRenderer.FIDUCIAL_INSET;
     const expectedTL: Point2D = { x: sx + sw * fiducialInset, y: sy + sh * fiducialInset };
     const expectedTR: Point2D = { x: sx + sw * (1 - fiducialInset), y: sy + sh * fiducialInset };
     const expectedBR: Point2D = { x: sx + sw * (1 - fiducialInset), y: sy + sh * (1 - fiducialInset) };
     const expectedBL: Point2D = { x: sx + sw * fiducialInset, y: sy + sh * (1 - fiducialInset) };
 
-    const searchRadius = Math.round(Math.min(sw, sh) * 0.18);
+    const midX = sx + sw * 0.5;
+    const midY = sy + sh * 0.5;
+    const expectedDim = Math.min(sw, sh);
 
-    // Refine centroids near expected locations
-    const ptTL = CornerFinder.findFiducialCentroid(data, width, height, expectedTL, searchRadius);
-    const ptTR = CornerFinder.findFiducialCentroid(data, width, height, expectedTR, searchRadius);
-    const ptBR = CornerFinder.findFiducialCentroid(data, width, height, expectedBR, searchRadius);
-    const ptBL = CornerFinder.findFiducialCentroid(data, width, height, expectedBL, searchRadius);
-
-    let corners: QuadCorners = {
-      topLeft: ptTL || expectedTL,
-      topRight: ptTR || expectedTR,
-      bottomRight: ptBR || expectedBR,
-      bottomLeft: ptBL || expectedBL,
-    };
+    // 2. Search each corner quadrant for concentric fiducial bullseye
+    let ptTL = CornerFinder.findFiducialInQuadrant(data, width, height, { minX: sx, maxX: midX, minY: sy, maxY: midY }, expectedTL, expectedDim);
+    let ptTR = CornerFinder.findFiducialInQuadrant(data, width, height, { minX: midX, maxX: sx + sw, minY: sy, maxY: midY }, expectedTR, expectedDim);
+    let ptBR = CornerFinder.findFiducialInQuadrant(data, width, height, { minX: midX, maxX: sx + sw, minY: midY, maxY: sy + sh }, expectedBR, expectedDim);
+    let ptBL = CornerFinder.findFiducialInQuadrant(data, width, height, { minX: sx, maxX: midX, minY: midY, maxY: sy + sh }, expectedBL, expectedDim);
 
     let fiducialsFound = 0;
     if (ptTL) fiducialsFound++;
@@ -74,88 +70,186 @@ export class CornerFinder {
     if (ptBR) fiducialsFound++;
     if (ptBL) fiducialsFound++;
 
-    // 3. Temporal smoothing filter to eliminate jitter
-    if (CornerFinder.lastValidCorners && fiducialsFound >= 2) {
-      const alpha = 0.75; // Smoothing factor
+    // 3. Extrapolate missing corner if 3 of 4 are detected with high confidence
+    if (fiducialsFound === 3) {
+      if (!ptTL && ptTR && ptBR && ptBL) ptTL = { x: ptTR.x + ptBL.x - ptBR.x, y: ptTR.y + ptBL.y - ptBR.y };
+      else if (!ptTR && ptTL && ptBR && ptBL) ptTR = { x: ptTL.x + ptBR.x - ptBL.x, y: ptTL.y + ptBR.y - ptBL.y };
+      else if (!ptBR && ptTL && ptTR && ptBL) ptBR = { x: ptTR.x + ptBL.x - ptTL.x, y: ptTR.y + ptBL.y - ptTL.y };
+      else if (!ptBL && ptTL && ptTR && ptBR) ptBL = { x: ptTL.x + ptBR.x - ptTR.x, y: ptTL.y + ptBR.y - ptTR.y };
+      fiducialsFound = 4;
+    }
+
+    // 4. If fewer than 3 fiducials found, check if we can sustain a short-lived streak
+    if (fiducialsFound < 3 || !ptTL || !ptTR || !ptBR || !ptBL) {
+      if (CornerFinder.lockStreak > 0 && CornerFinder.lastValidCorners) {
+        CornerFinder.lockStreak = Math.max(0, CornerFinder.lockStreak - 1);
+        if (CornerFinder.lockStreak > 0) {
+          return {
+            corners: CornerFinder.lastValidCorners,
+            matrixCorners: CornerFinder.computeMatrixCorners(CornerFinder.lastValidCorners),
+            confidence: 0.60,
+            rotationOffset: 0,
+            isDirectLock: false,
+          };
+        }
+      }
+      CornerFinder.lastValidCorners = null;
+      CornerFinder.lockStreak = 0;
+      return null;
+    }
+
+    let corners: QuadCorners = {
+      topLeft: ptTL,
+      topRight: ptTR,
+      bottomRight: ptBR,
+      bottomLeft: ptBL,
+    };
+
+    // 5. Temporal smoothing filter to eliminate camera jitter
+    if (CornerFinder.lastValidCorners) {
+      const alpha = 0.70;
       corners = {
         topLeft: CornerFinder.lerpPoint(CornerFinder.lastValidCorners.topLeft, corners.topLeft, alpha),
         topRight: CornerFinder.lerpPoint(CornerFinder.lastValidCorners.topRight, corners.topRight, alpha),
         bottomRight: CornerFinder.lerpPoint(CornerFinder.lastValidCorners.bottomRight, corners.bottomRight, alpha),
         bottomLeft: CornerFinder.lerpPoint(CornerFinder.lastValidCorners.bottomLeft, corners.bottomLeft, alpha),
       };
-      CornerFinder.lockStreak++;
-    } else if (fiducialsFound >= 2) {
-      CornerFinder.lockStreak = 1;
+      CornerFinder.lockStreak = Math.min(10, CornerFinder.lockStreak + 1);
     } else {
-      CornerFinder.lockStreak = Math.max(0, CornerFinder.lockStreak - 1);
+      CornerFinder.lockStreak = 1;
     }
 
     CornerFinder.lastValidCorners = corners;
-
-    // 4. Calculate exact matrix bounding box inside the fiducials
     const matrixCorners = CornerFinder.computeMatrixCorners(corners);
-
-    const confidence = fiducialsFound >= 3 ? 0.95 : fiducialsFound >= 2 ? 0.75 : 0.5;
 
     return {
       corners,
       matrixCorners,
-      confidence,
+      confidence: 0.95,
       rotationOffset: 0,
-      isDirectLock: fiducialsFound >= 2,
+      isDirectLock: true,
     };
   }
 
   /**
-   * Searches for a high-contrast concentric target centroid around an expected point
-   * Uses adaptive two-pass contrast thresholding to isolate bright ring under any camera exposure
+   * Searches for a concentric fiducial bullseye in a given quadrant
    */
-  private static findFiducialCentroid(
+  private static findFiducialInQuadrant(
     data: Uint8ClampedArray,
     width: number,
     height: number,
-    center: Point2D,
-    radius: number
+    quadrant: { minX: number; maxX: number; minY: number; maxY: number },
+    expectedCenter: Point2D,
+    expectedDim: number
   ): Point2D | null {
-    const minX = Math.max(0, Math.round(center.x - radius));
-    const maxX = Math.min(width - 1, Math.round(center.x + radius));
-    const minY = Math.max(0, Math.round(center.y - radius));
-    const maxY = Math.min(height - 1, Math.round(center.y + radius));
+    const minX = Math.max(0, Math.round(quadrant.minX));
+    const maxX = Math.min(width - 1, Math.round(quadrant.maxX));
+    const minY = Math.max(0, Math.round(quadrant.minY));
+    const maxY = Math.min(height - 1, Math.round(quadrant.maxY));
 
-    // 1st pass: find local luminance dynamic range in this quadrant
+    if (maxX <= minX + 12 || maxY <= minY + 12) return null;
+
+    // 1. Measure local luminance range in quadrant
     let minLuma = 255;
     let maxLuma = 0;
+    const step = 4;
 
-    for (let y = minY; y <= maxY; y += 3) {
-      for (let x = minX; x <= maxX; x += 3) {
-        const idx = (y * width + x) * 4;
-        const luma = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+    for (let y = minY; y <= maxY; y += step) {
+      for (let x = minX; x <= maxX; x += step) {
+        const luma = CornerFinder.getLuma(data, width, height, x, y);
         if (luma < minLuma) minLuma = luma;
         if (luma > maxLuma) maxLuma = luma;
       }
     }
 
     const contrast = maxLuma - minLuma;
-    if (contrast < 24) return null;
+    if (contrast < 22) return null;
 
-    // Adaptive threshold: top 35% brightest pixels in this local window
-    const threshold = minLuma + contrast * 0.65;
+    const brightThreshold = minLuma + contrast * 0.50;
 
+    // 2. Sample candidates for concentric ring signature (bright dot, dark ring, bright ring)
+    let bestScore = 0;
+    let bestCandidate: Point2D | null = null;
+    let bestDotRadius = Math.max(2, Math.round(expectedDim * 0.022));
+
+    const testScales = [expectedDim * 0.8, expectedDim, expectedDim * 1.2];
+    const candidateStep = Math.max(2, Math.round(expectedDim * 0.018));
+
+    for (let y = minY + 6; y <= maxY - 6; y += candidateStep) {
+      for (let x = minX + 6; x <= maxX - 6; x += candidateStep) {
+        const cLuma = CornerFinder.getLuma(data, width, height, x, y);
+        if (cLuma < brightThreshold) continue;
+
+        for (const S of testScales) {
+          const rMid = Math.max(2, Math.round(S * 0.038));
+          const rOuter = Math.max(4, Math.round(S * 0.055));
+          const rOut = Math.max(6, Math.round(S * 0.080));
+
+          const midLuma = (
+            CornerFinder.getLuma(data, width, height, x + rMid, y) +
+            CornerFinder.getLuma(data, width, height, x - rMid, y) +
+            CornerFinder.getLuma(data, width, height, x, y + rMid) +
+            CornerFinder.getLuma(data, width, height, x, y - rMid)
+          ) * 0.25;
+
+          const ringLuma = (
+            CornerFinder.getLuma(data, width, height, x + rOuter, y) +
+            CornerFinder.getLuma(data, width, height, x - rOuter, y) +
+            CornerFinder.getLuma(data, width, height, x, y + rOuter) +
+            CornerFinder.getLuma(data, width, height, x, y - rOuter)
+          ) * 0.25;
+
+          const outLuma = (
+            CornerFinder.getLuma(data, width, height, x + rOut, y) +
+            CornerFinder.getLuma(data, width, height, x - rOut, y) +
+            CornerFinder.getLuma(data, width, height, x, y + rOut) +
+            CornerFinder.getLuma(data, width, height, x, y - rOut)
+          ) * 0.25;
+
+          const score = (cLuma - midLuma) + (ringLuma - midLuma) + (ringLuma - outLuma);
+
+          if (score > bestScore) {
+            bestScore = score;
+            bestCandidate = { x, y };
+            bestDotRadius = S * 0.022;
+          }
+        }
+      }
+    }
+
+    if (!bestCandidate || bestScore < 30) {
+      // Fallback: search around expected center point if local contrast is present
+      return CornerFinder.fallbackCentroid(data, width, height, expectedCenter, expectedDim * 0.18, minLuma, contrast);
+    }
+
+    return CornerFinder.refineDotCentroid(data, width, height, bestCandidate, Math.max(3, Math.round(bestDotRadius * 1.5)));
+  }
+
+  private static fallbackCentroid(
+    data: Uint8ClampedArray,
+    width: number,
+    height: number,
+    center: Point2D,
+    radius: number,
+    minLuma: number,
+    contrast: number
+  ): Point2D | null {
+    const minX = Math.max(0, Math.round(center.x - radius));
+    const maxX = Math.min(width - 1, Math.round(center.x + radius));
+    const minY = Math.max(0, Math.round(center.y - radius));
+    const maxY = Math.min(height - 1, Math.round(center.y + radius));
+
+    const threshold = minLuma + contrast * 0.60;
     let sumX = 0;
     let sumY = 0;
     let totalWeight = 0;
 
-    // 2nd pass: sample pixels exceeding threshold
     for (let y = minY; y <= maxY; y += 2) {
       for (let x = minX; x <= maxX; x += 2) {
-        const idx = (y * width + x) * 4;
-        const luma = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-
+        const luma = CornerFinder.getLuma(data, width, height, x, y);
         if (luma > threshold) {
           const d = Math.hypot(x - center.x, y - center.y);
-          const spatialWeight = Math.max(0.1, 1 - d / radius);
-          const weight = (luma - threshold) * spatialWeight;
-
+          const weight = (luma - threshold) * Math.max(0.1, 1 - d / radius);
           sumX += x * weight;
           sumY += y * weight;
           totalWeight += weight;
@@ -163,12 +257,47 @@ export class CornerFinder {
       }
     }
 
-    if (totalWeight < 50) return null;
+    if (totalWeight < 40) return null;
+    return { x: sumX / totalWeight, y: sumY / totalWeight };
+  }
 
-    return {
-      x: sumX / totalWeight,
-      y: sumY / totalWeight,
-    };
+  private static refineDotCentroid(
+    data: Uint8ClampedArray,
+    width: number,
+    height: number,
+    center: Point2D,
+    radius: number
+  ): Point2D {
+    const minX = Math.max(0, Math.round(center.x - radius));
+    const maxX = Math.min(width - 1, Math.round(center.x + radius));
+    const minY = Math.max(0, Math.round(center.y - radius));
+    const maxY = Math.min(height - 1, Math.round(center.y + radius));
+
+    let sumX = 0;
+    let sumY = 0;
+    let totalWeight = 0;
+
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        const d = Math.hypot(x - center.x, y - center.y);
+        if (d > radius) continue;
+        const luma = CornerFinder.getLuma(data, width, height, x, y);
+        const weight = luma * (1 - d / (radius * 1.2));
+        sumX += x * weight;
+        sumY += y * weight;
+        totalWeight += weight;
+      }
+    }
+
+    if (totalWeight < 1) return center;
+    return { x: sumX / totalWeight, y: sumY / totalWeight };
+  }
+
+  private static getLuma(data: Uint8ClampedArray, width: number, height: number, x: number, y: number): number {
+    const px = Math.max(0, Math.min(width - 1, Math.round(x)));
+    const py = Math.max(0, Math.min(height - 1, Math.round(y)));
+    const idx = (py * width + px) * 4;
+    return 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
   }
 
   private static lerpPoint(p1: Point2D, p2: Point2D, alpha: number): Point2D {

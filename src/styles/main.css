@@ -604,7 +604,9 @@ body {
 }
 
 .camera-viewport-wrapper {
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 1 / 1;
+  max-height: 54vh;
+  margin: 0 auto;
 }
 
 .optical-canvas-wrapper canvas, .camera-viewport-wrapper video {

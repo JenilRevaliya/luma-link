@@ -62,6 +62,7 @@ export class VisionPipeline {
   private lastReportedState: string = 'SEARCHING';
   private frameCount = 0;
   private lastUndecodedWarning = 0;
+  public lastHomography: Homography | null = null;
 
   constructor(calibrator: ColorCalibrator) {
     this.calibrator = calibrator;
@@ -69,6 +70,10 @@ export class VisionPipeline {
 
   public getLastKnownCorners(): QuadCorners | null {
     return this.lastKnownCorners;
+  }
+
+  public getLastHomography(): Homography | null {
+    return this.lastHomography;
   }
 
   /**
@@ -93,6 +98,7 @@ export class VisionPipeline {
     }
 
     if (!corners) {
+      this.lastHomography = null;
       return {
         state: 'SEARCHING',
         corners: null,
@@ -124,6 +130,7 @@ export class VisionPipeline {
 
     // Compute homography mapping from unit square canvas to camera frame
     const H = Homography.from4Points(srcPoints, dstPoints);
+    this.lastHomography = H;
     if (!H) {
       return {
         state: 'SEARCHING',
@@ -202,8 +209,23 @@ export class VisionPipeline {
       this.consecutiveLocks = Math.max(0, this.consecutiveLocks - 1);
       if (this.frameCount - this.lastUndecodedWarning >= 90) {
         this.lastUndecodedWarning = this.frameCount;
-        const insp = FrameCodec.inspectFrame(MatrixMapper.matrixToBytes(gridSymbols));
-        debugLogger.warn('CODEC', `Optical frame not decoded across 4 rotations. Rot 0: ${insp.summary}`);
+        let matchedRot = -1;
+        let bestRotSummary = '';
+        for (let rot = 0; rot < 4; rot++) {
+          const rotGrid = this.rotateGrid(gridSymbols, rot);
+          const insp = FrameCodec.inspectFrame(MatrixMapper.matrixToBytes(rotGrid));
+          if (insp.magicMatch) {
+            matchedRot = rot;
+            bestRotSummary = `Rot ${rot * 90}°: ${insp.summary}`;
+            break;
+          }
+        }
+        if (matchedRot >= 0) {
+          debugLogger.warn('CODEC', `Optical frame candidate found: ${bestRotSummary}`);
+        } else {
+          const insp0 = FrameCodec.inspectFrame(MatrixMapper.matrixToBytes(gridSymbols));
+          debugLogger.warn('CODEC', `Undecoded: No magic byte match across 4 rotations (Rot 0: found [${insp0.magicHex}])`);
+        }
       }
     }
 

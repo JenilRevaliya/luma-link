@@ -54,15 +54,9 @@ export class VisualFrameRenderer {
 
     const palette = options.palette || DEFAULT_PALETTE;
 
-    // 1. High contrast outer background & Quiet Zone
+    // 1. High contrast dark background & Quiet Zone around fiducials
     ctx.fillStyle = '#0a0a0f';
     ctx.fillRect(0, 0, size, size);
-
-    // High contrast white outer perimeter ring
-    const borderPad = size * 0.015;
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = size * 0.008;
-    ctx.strokeRect(borderPad, borderPad, size - 2 * borderPad, size - 2 * borderPad);
 
     // 2. Draw 4 Corner Fiducial Markers
     const fiducials = VisualFrameRenderer.getFiducialCenters();

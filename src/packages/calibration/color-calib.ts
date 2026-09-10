@@ -135,10 +135,41 @@ export class ColorCalibrator {
     const minChannel = Math.min(r, g, b);
     const saturation = maxChannel > 0 ? (maxChannel - minChannel) / maxChannel : 0;
 
-    // 1. Black Detection:
-    // If luminance is below dynamic black threshold, or saturation is very low and max channel is low
-    const isDark = luma < this.dynamicBlackLuma;
-    const isDesaturatedDark = maxChannel < 85 && saturation < 0.25;
+    // 1. Channel Dominance for Chromatic Cells (Red, Green, Blue)
+    // When photographed from displays, Red and Blue have low BT.601 luminance coefficients,
+    // so checking dominance first prevents dark red/blue cells from being misclassified as black!
+    const rDelta = r - Math.max(g, b);
+    const gDelta = g - Math.max(r, b);
+    const bDelta = b - Math.max(r, g);
+
+    if (rDelta > 16 && r > 38 && r > g * 1.12 && r > b * 1.12) {
+      return {
+        color: ColorIndex.RED,
+        distance: Math.abs(255 - r) + g + b,
+        confidence: Math.min(1.0, Math.max(0.6, rDelta / 60)),
+      };
+    }
+
+    if (gDelta > 16 && g > 38 && g > r * 1.12 && g > b * 1.12) {
+      return {
+        color: ColorIndex.GREEN,
+        distance: r + Math.abs(255 - g) + b,
+        confidence: Math.min(1.0, Math.max(0.6, gDelta / 60)),
+      };
+    }
+
+    if (bDelta > 14 && b > 38 && b > r * 1.10 && b > g * 1.10) {
+      return {
+        color: ColorIndex.BLUE,
+        distance: r + g + Math.abs(255 - b),
+        confidence: Math.min(1.0, Math.max(0.6, bDelta / 60)),
+      };
+    }
+
+    // 2. Black Detection:
+    // Achromatic cells where all channels are low or desaturated
+    const isDark = maxChannel < Math.max(65, this.dynamicBlackLuma) || luma < this.dynamicBlackLuma;
+    const isDesaturatedDark = maxChannel < 95 && saturation < 0.22;
 
     if (isDark || isDesaturatedDark) {
       const dist = Math.hypot(
@@ -149,39 +180,7 @@ export class ColorCalibrator {
       return {
         color: ColorIndex.BLACK,
         distance: dist,
-        confidence: Math.max(0.6, 1.0 - (luma / Math.max(1, this.dynamicBlackLuma))),
-      };
-    }
-
-    // 2. Channel Dominance for Chromatic Cells (Red, Green, Blue)
-    // Red channel dominance
-    const rDelta = r - Math.max(g, b);
-    // Green channel dominance
-    const gDelta = g - Math.max(r, b);
-    // Blue channel dominance
-    const bDelta = b - Math.max(r, g);
-
-    if (rDelta > 15 && r > g * 1.15 && r > b * 1.15) {
-      return {
-        color: ColorIndex.RED,
-        distance: Math.abs(255 - r) + g + b,
-        confidence: Math.min(1.0, rDelta / 80),
-      };
-    }
-
-    if (gDelta > 15 && g > r * 1.15 && g > b * 1.15) {
-      return {
-        color: ColorIndex.GREEN,
-        distance: r + Math.abs(255 - g) + b,
-        confidence: Math.min(1.0, gDelta / 80),
-      };
-    }
-
-    if (bDelta > 15 && b > r * 1.15 && b > g * 1.15) {
-      return {
-        color: ColorIndex.BLUE,
-        distance: r + g + Math.abs(255 - b),
-        confidence: Math.min(1.0, bDelta / 80),
+        confidence: Math.max(0.6, 1.0 - (maxChannel / 120)),
       };
     }
 

@@ -31,6 +31,7 @@ export class ReceiverApp {
   // External simulated frame provider for loopback simulator
   public externalFrameProvider?: () => ImageData | null;
   public externalCornersProvider?: () => QuadCorners | null;
+  public showSamplingHUD = false;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -382,6 +383,10 @@ export class ReceiverApp {
         this.cameraCanvas.height = vh;
         this.reticleCanvas.width = vw;
         this.reticleCanvas.height = vh;
+        const wrapper = this.container.querySelector('.camera-viewport-wrapper') as HTMLElement | null;
+        if (wrapper) {
+          wrapper.style.aspectRatio = `${vw} / ${vh}`;
+        }
       }
 
       const ctx = this.cameraCanvas.getContext('2d', { willReadFrequently: true });
@@ -412,7 +417,12 @@ export class ReceiverApp {
         let displayedL: number;
         let displayedT: number;
 
-        if (wrapperAspect > videoAspect) {
+        if (Math.abs(wrapperAspect - videoAspect) < 0.05) {
+          displayedW = wrapperRect.width;
+          displayedH = wrapperRect.height;
+          displayedL = 0;
+          displayedT = 0;
+        } else if (wrapperAspect > videoAspect) {
           displayedH = wrapperRect.height;
           displayedW = displayedH * videoAspect;
           displayedL = (wrapperRect.width - displayedW) / 2;
@@ -430,11 +440,16 @@ export class ReceiverApp {
         const rw = reticleRect.width * scale;
         const rh = reticleRect.height * scale;
 
+        const clampedX = Math.max(0, Math.min(vw - 20, Math.round(rx)));
+        const clampedY = Math.max(0, Math.min(vh - 20, Math.round(ry)));
+        const clampedW = Math.min(vw - clampedX, Math.max(20, Math.round(rw)));
+        const clampedH = Math.min(vh - clampedY, Math.max(20, Math.round(rh)));
+
         searchBounds = {
-          x: Math.round(rx),
-          y: Math.round(ry),
-          width: Math.round(rw),
-          height: Math.round(rh),
+          x: clampedX,
+          y: clampedY,
+          width: clampedW,
+          height: clampedH,
         };
       }
     }
@@ -546,6 +561,28 @@ export class ReceiverApp {
       ctx.arc(f.pt.x, f.pt.y, 3.5, 0, Math.PI * 2);
       ctx.fill();
     }
+
+    // 4. Draw 256 cell sampling coordinates when HUD inspection is enabled
+    if (this.showSamplingHUD) {
+      const H = this.pipeline.getLastHomography();
+      if (H) {
+        const matrixInset = 0.20;
+        const matrixFrac = 0.60;
+        const cellSize = matrixFrac / 16;
+        ctx.fillStyle = '#ffea00';
+        for (let r = 0; r < 16; r++) {
+          for (let c = 0; c < 16; c++) {
+            const u = matrixInset + (c + 0.5) * cellSize;
+            const v = matrixInset + (r + 0.5) * cellSize;
+            const pt = H.transform(u, v);
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, 1.8, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+    }
+
     ctx.restore();
   }
 

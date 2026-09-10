@@ -174,14 +174,14 @@ export class FrameCodec {
 
     if (isValid) {
       summary = `VALID ${typeName} frame (Pkt #${buffer[7]}/${buffer[8]}, Session #${view.getUint16(4, false).toString(16).toUpperCase()}, RS: ${rsErrors} errs)`;
-    } else if (rsErrors < 0) {
-      summary = `CORRUPT: RS ECC failed (>4 byte errors, uncorrectable)`;
     } else if (!magicMatch) {
       summary = `NO MAGIC: found [${magicHex}], expected [0x4C 0x4D] ('LM')`;
-    } else if (!crcMatch) {
-      summary = `CRC MISMATCH: stored ${storedCrcHex} != calc ${calcCrcHex} (RS corrected: ${rsErrors})`;
     } else if (!versionMatch) {
       summary = `VERSION MISMATCH: got ${ver}, expected ${PROTOCOL_VERSION}`;
+    } else if (rsErrors < 0) {
+      summary = `CORRUPT: RS ECC failed (>4 byte errors, uncorrectable)`;
+    } else if (!crcMatch) {
+      summary = `CRC MISMATCH: stored ${storedCrcHex} != calc ${calcCrcHex} (RS corrected: ${rsErrors})`;
     }
 
     return {

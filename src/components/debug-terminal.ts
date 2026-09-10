@@ -65,6 +65,9 @@ export class DebugTerminal {
             <button class="btn btn-sm btn-outline" id="btn-trace-snapshot" title="Run instant step-by-step pipeline diagnostic on current frame">
               📸 SNAPSHOT FRAME TRACE
             </button>
+            <button class="btn btn-sm btn-outline" id="btn-toggle-hud" title="Toggle visual yellow sampling dots on receiver camera">
+              🎯 SAMPLING HUD: OFF
+            </button>
             <button class="btn btn-sm btn-ghost" id="btn-export-log" title="Download log file">
               💾 EXPORT
             </button>
@@ -179,6 +182,20 @@ export class DebugTerminal {
     this.container.querySelector('#btn-trace-snapshot')?.addEventListener('click', () => {
       this.handleSnapshotTrace();
     });
+
+    // Toggle Sampling HUD
+    const hudBtn = this.container.querySelector('#btn-toggle-hud') as HTMLButtonElement | null;
+    if (hudBtn) {
+      hudBtn.addEventListener('click', () => {
+        if (this.receiverApp) {
+          this.receiverApp.showSamplingHUD = !this.receiverApp.showSamplingHUD;
+          hudBtn.textContent = this.receiverApp.showSamplingHUD ? '🎯 SAMPLING HUD: ON' : '🎯 SAMPLING HUD: OFF';
+          debugLogger.info('VISION', `Sampling points visual overlay ${this.receiverApp.showSamplingHUD ? 'ENABLED' : 'DISABLED'}`);
+        } else {
+          debugLogger.warn('VISION', 'Receiver UI not connected to toggle sampling HUD');
+        }
+      });
+    }
 
     // Auto-scroll toggle
     const chk = this.container.querySelector('#chk-autoscroll') as HTMLInputElement;

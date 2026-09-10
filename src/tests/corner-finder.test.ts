@@ -72,4 +72,35 @@ describe('CornerFinder & Optical Calibration', () => {
     const redClass = calibrator.classify(228, 31, 35);
     expect(redClass.color).toBe(ColorIndex.RED);
   });
+
+  it('classifies low-luma saturated red and blue as chromatic, not black', () => {
+    const calibrator = new ColorCalibrator();
+    // Moderately lit red on an LCD (luma ~45, below old dynamicBlackLuma of 70)
+    const redCell = calibrator.classify(115, 20, 25);
+    expect(redCell.color).toBe(ColorIndex.RED);
+
+    // Moderately lit blue on an LCD (luma ~42, below old dynamicBlackLuma of 70)
+    const blueCell = calibrator.classify(25, 30, 140);
+    expect(blueCell.color).toBe(ColorIndex.BLUE);
+
+    // True black LCD cell with backlight bleed
+    const blackCell = calibrator.classify(30, 32, 35);
+    expect(blackCell.color).toBe(ColorIndex.BLACK);
+  });
+
+  it('returns null on noise image with no fiducials', () => {
+    const width = 400;
+    const height = 400;
+    const buffer = new Uint8ClampedArray(width * height * 4);
+    // Fill with moderate gray noise
+    for (let i = 0; i < buffer.length; i += 4) {
+      buffer[i] = 80;
+      buffer[i + 1] = 80;
+      buffer[i + 2] = 80;
+      buffer[i + 3] = 255;
+    }
+    const imgData = { width, height, data: buffer } as ImageData;
+    const result = CornerFinder.findCorners(imgData);
+    expect(result).toBeNull();
+  });
 });
