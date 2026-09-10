@@ -20,8 +20,8 @@ export class SenderApp {
   // Photo state
   private currentImage: HTMLImageElement | HTMLCanvasElement | null = null;
   private cropMode: CropMode = 'center-crop';
-  private targetResolution = 384;
-  private quality = 0.78;
+  private targetResolution = 192;
+  private quality = 0.72;
 
   // Text state
   private currentText = '';
@@ -91,9 +91,10 @@ export class SenderApp {
               <div class="control-group">
                 <label class="control-label">Resolution Preset</label>
                 <select class="select-input" id="resolution-select">
-                  <option value="256">256 × 256 (Ultra-Fast ~4KB, ~2s)</option>
-                  <option value="384" selected>384 × 384 (Standard ~15KB, ~6s)</option>
-                  <option value="512">512 × 512 (HQ ~35KB, ~15s)</option>
+                  <option value="128">128 × 128 (Ultra-Fast ~2KB, ~4s)</option>
+                  <option value="192" selected>192 × 192 (Standard ~5KB, ~10s)</option>
+                  <option value="256">256 × 256 (Detailed ~12KB, ~25s)</option>
+                  <option value="384">384 × 384 (High-Res ~25KB, ~50s)</option>
                 </select>
               </div>
 
