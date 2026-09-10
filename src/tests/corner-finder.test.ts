@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { CornerFinder } from '../packages/decoder/corner-finder';
 import { ColorCalibrator } from '../packages/calibration/color-calib';
-import { VisualFrameRenderer } from '../packages/encoder/visual-frame';
 import { ColorIndex, type RGBColor } from '../packages/protocol/types';
 
 describe('CornerFinder & Optical Calibration', () => {
