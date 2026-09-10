@@ -352,4 +352,97 @@ describe('CornerFinder & Optical Calibration', () => {
       expect(blurredRes!.isDirectLock).toBe(false);
     }
   });
+
+  it('detects corners in a realistic 720x1280 mobile portrait camera view with background clutter and reticle bounds', () => {
+    CornerFinder.reset();
+    const width = 720;
+    const height = 1280;
+    const buffer = new Uint8ClampedArray(width * height * 4);
+
+    // Fill with ambient room clutter (desk & wall luma ~60..120)
+    for (let i = 0; i < buffer.length; i += 4) {
+      buffer[i] = 75;
+      buffer[i + 1] = 80;
+      buffer[i + 2] = 85;
+      buffer[i + 3] = 255;
+    }
+
+    // Centered transmitter screen (400x400) inside camera view
+    const screenX = 160;
+    const screenY = 440;
+    const screenDim = 400;
+
+    // Dark screen background (#0a0a0f)
+    for (let y = screenY; y < screenY + screenDim; y++) {
+      for (let x = screenX; x < screenX + screenDim; x++) {
+        const idx = (y * width + x) * 4;
+        buffer[idx] = 10;
+        buffer[idx + 1] = 10;
+        buffer[idx + 2] = 15;
+      }
+    }
+
+    const drawFiducial = (cx: number, cy: number, isTL: boolean) => {
+      const M = 6;
+      const halfW = 3.5 * M; // 21
+      for (let y = cy - halfW; y < cy + halfW; y++) {
+        for (let x = cx - halfW; x < cx + halfW; x++) {
+          const idx = (y * width + x) * 4;
+          buffer[idx] = 255; buffer[idx + 1] = 255; buffer[idx + 2] = 255;
+        }
+      }
+      const halfDark = 2.5 * M; // 15
+      for (let y = cy - halfDark; y < cy + halfDark; y++) {
+        for (let x = cx - halfDark; x < cx + halfDark; x++) {
+          const idx = (y * width + x) * 4;
+          buffer[idx] = 10; buffer[idx + 1] = 10; buffer[idx + 2] = 15;
+        }
+      }
+      const halfCore = 1.5 * M; // 9
+      for (let y = cy - halfCore; y < cy + halfCore; y++) {
+        for (let x = cx - halfCore; x < cx + halfCore; x++) {
+          const idx = (y * width + x) * 4;
+          if (isTL) {
+            buffer[idx] = 0; buffer[idx + 1] = 240; buffer[idx + 2] = 255;
+          } else {
+            buffer[idx] = 255; buffer[idx + 1] = 255; buffer[idx + 2] = 255;
+          }
+        }
+      }
+    };
+
+    const inset = 0.09;
+    const tl = { x: Math.round(screenX + screenDim * inset), y: Math.round(screenY + screenDim * inset) };
+    const tr = { x: Math.round(screenX + screenDim * (1 - inset)), y: Math.round(screenY + screenDim * inset) };
+    const br = { x: Math.round(screenX + screenDim * (1 - inset)), y: Math.round(screenY + screenDim * (1 - inset)) };
+    const bl = { x: Math.round(screenX + screenDim * inset), y: Math.round(screenY + screenDim * (1 - inset)) };
+
+    drawFiducial(tl.x, tl.y, true);
+    drawFiducial(tr.x, tr.y, false);
+    drawFiducial(br.x, br.y, false);
+    drawFiducial(bl.x, bl.y, false);
+
+    // Reticle search bounds around the screen with margins
+    const searchBounds = {
+      x: screenX - 20,
+      y: screenY - 20,
+      width: screenDim + 40,
+      height: screenDim + 40,
+    };
+
+    const imgData = { width, height, data: buffer } as ImageData;
+    const res = CornerFinder.findCorners(imgData, searchBounds);
+
+    expect(res).not.toBeNull();
+    expect(res!.confidence).toBeGreaterThan(0.85);
+
+    expect(Math.abs(res!.corners.topLeft.x - tl.x)).toBeLessThan(5);
+    expect(Math.abs(res!.corners.topLeft.y - tl.y)).toBeLessThan(5);
+    expect(Math.abs(res!.corners.topRight.x - tr.x)).toBeLessThan(5);
+    expect(Math.abs(res!.corners.topRight.y - tr.y)).toBeLessThan(5);
+    expect(Math.abs(res!.corners.bottomRight.x - br.x)).toBeLessThan(5);
+    expect(Math.abs(res!.corners.bottomRight.y - br.y)).toBeLessThan(5);
+    expect(Math.abs(res!.corners.bottomLeft.x - bl.x)).toBeLessThan(5);
+    expect(Math.abs(res!.corners.bottomLeft.y - bl.y)).toBeLessThan(5);
+  });
 });

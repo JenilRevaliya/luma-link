@@ -1,6 +1,6 @@
 /**
  * LumaLink Optical Corner Fiducial Finder
- * Industrial QR-style 1:1:3:1:1 scanline finder pattern detection,
+ * Industrial QR-style 1:1:3:1:1 run-length finder pattern detection,
  * sub-pixel centroid clustering, affine corner completion, and
  * temporal hysteresis smoothing
  */
@@ -14,6 +14,18 @@ export interface DetectionResult {
   confidence: number;
   rotationOffset: number;      // 0, 1, 2, 3 (0°, 90°, 180°, 270°)
   isDirectLock: boolean;
+}
+
+interface Run {
+  isLight: boolean;
+  len: number;
+  startX: number;
+}
+
+interface ColRun {
+  isLight: boolean;
+  len: number;
+  startY: number;
 }
 
 interface FinderCandidate {
@@ -50,28 +62,22 @@ export class CornerFinder {
   ): DetectionResult | null {
     const { width, height, data } = imgData;
 
-    // 1. Establish search bounds (expand slightly for margin of error if provided)
+    // 1. Establish search bounds
     let sx = 0;
     let sy = 0;
     let sw = width;
     let sh = height;
 
     if (searchBounds && searchBounds.width > 40 && searchBounds.height > 40) {
-      const padX = Math.round(Math.max(30, searchBounds.width * 0.20));
-      const padY = Math.round(Math.max(30, searchBounds.height * 0.20));
+      const padX = Math.round(Math.max(25, searchBounds.width * 0.18));
+      const padY = Math.round(Math.max(25, searchBounds.height * 0.18));
       sx = Math.max(0, searchBounds.x - padX);
       sy = Math.max(0, searchBounds.y - padY);
       sw = Math.min(width - sx, searchBounds.width + 2 * padX);
       sh = Math.min(height - sy, searchBounds.height + 2 * padY);
-    } else {
-      // Default: scan full camera image
-      sx = 0;
-      sy = 0;
-      sw = width;
-      sh = height;
     }
 
-    if (sw < 50 || sh < 50) {
+    if (sw < 40 || sh < 40) {
       return CornerFinder.handleDecayFallback();
     }
 
@@ -89,85 +95,27 @@ export class CornerFinder {
     }
 
     const contrast = maxLuma - minLuma;
-    if (contrast < 20) {
-      // Scene lacks sufficient contrast (e.g. gray noise or black frame)
+    if (contrast < 18) {
+      // Uniform gray noise or dark frame
       return CornerFinder.handleDecayFallback();
     }
 
-    const threshold = minLuma + contrast * 0.44;
+    // Test adaptive thresholds to handle ambient light variations & glare
+    const thresholds = [
+      minLuma + contrast * 0.44, // standard
+      minLuma + contrast * 0.35, // shadow/low-exposure boost
+      minLuma + contrast * 0.55, // glare/high-exposure boost
+    ];
 
-    // 3. QR-Style 1:1:3:1:1 Scanline Detection
-    const candidates: FinderCandidate[] = [];
-    const rowStep = Math.max(2, Math.round(sh / 110));
+    let candidates: FinderCandidate[] = [];
 
-    for (let y = sy + 4; y < sy + sh - 4; y += rowStep) {
-      // stateCount: [Light0, Dark1, Light2 (center core), Dark3, Light4]
-      const stateCount = [0, 0, 0, 0, 0];
-      let currentState = 0;
-      let isLight = CornerFinder.getLuma(data, width, height, sx, y) >= threshold;
-
-      for (let x = sx; x < sx + sw; x++) {
-        const pixelLight = CornerFinder.getLuma(data, width, height, x, y) >= threshold;
-
-        if (pixelLight === isLight) {
-          stateCount[currentState]++;
-        } else {
-          // Transition occurred
-          if (isLight) {
-            // Light -> Dark transition.
-            // If currentState === 4, stateCount has the full 5-run sequence
-            if (currentState === 4) {
-              if (CornerFinder.checkRatio(stateCount)) {
-                const totalH = stateCount[0] + stateCount[1] + stateCount[2] + stateCount[3] + stateCount[4];
-                const moduleH = totalH / 7;
-                const candX = x - stateCount[4] - stateCount[3] - stateCount[2] / 2;
-
-                // Vertical Cross-Check
-                const vRes = CornerFinder.crossCheckVertical(
-                  data,
-                  width,
-                  height,
-                  Math.round(candX),
-                  y,
-                  moduleH,
-                  threshold,
-                  sy,
-                  sy + sh
-                );
-
-                if (vRes !== null) {
-                  candidates.push({
-                    x: candX,
-                    y: vRes.y,
-                    moduleSize: (moduleH + vRes.moduleSize) / 2,
-                  });
-                }
-              }
-
-              // Shift state counts: drop first pair, keep last 3, add new dark run
-              stateCount[0] = stateCount[2];
-              stateCount[1] = stateCount[3];
-              stateCount[2] = stateCount[4];
-              stateCount[3] = 1;
-              stateCount[4] = 0;
-              currentState = 3;
-            } else {
-              currentState++;
-              stateCount[currentState] = 1;
-            }
-          } else {
-            // Dark -> Light transition
-            currentState++;
-            if (currentState > 4) currentState = 4;
-            stateCount[currentState] = 1;
-          }
-
-          isLight = pixelLight;
-        }
-      }
+    for (const threshold of thresholds) {
+      const found = CornerFinder.scanForCandidates(data, width, height, sx, sy, sw, sh, threshold);
+      candidates = candidates.concat(found);
+      if (candidates.length >= 8) break; // Sufficient candidates acquired
     }
 
-    // 4. Cluster candidates from adjacent scanlines
+    // 3. Cluster candidates from adjacent scanlines
     const clusters: CandidateCluster[] = [];
     for (const cand of candidates) {
       let matched = false;
@@ -194,34 +142,48 @@ export class CornerFinder {
       }
     }
 
-    // Sort clusters by hit counts
-    const points: Point2D[] = clusters
-      .filter((cl) => cl.count >= 1)
-      .map((cl) => ({ x: cl.sumX / cl.count, y: cl.sumY / cl.count }));
+    // Sort clusters by hit count descending
+    clusters.sort((a, b) => b.count - a.count);
+    const points: Point2D[] = clusters.map((cl) => ({
+      x: cl.sumX / cl.count,
+      y: cl.sumY / cl.count,
+    }));
 
-    // 5. Match and extrapolate the 4 corners
+    // 4. Resolve 4 corners from clusters
     let resolvedCorners: QuadCorners | null = null;
 
     if (points.length >= 4) {
       resolvedCorners = CornerFinder.assign4Corners(points, data, width, height);
     } else if (points.length === 3) {
       resolvedCorners = CornerFinder.extrapolateFrom3Corners(points, data, width, height);
+    } else if (points.length === 2) {
+      resolvedCorners = CornerFinder.extrapolateFrom2Corners(points[0], points[1]);
     }
 
-    // 6. Secondary fallback: Reticle-guided quadrant bullseye search if QR scanline missed
+    // 5. Fallback: Reticle-guided quadrant centroid search if scanline missed
     if (!resolvedCorners) {
-      resolvedCorners = CornerFinder.findCornersViaQuadrants(data, width, height, sx, sy, sw, sh, minLuma, contrast);
+      resolvedCorners = CornerFinder.findCornersViaQuadrants(
+        data,
+        width,
+        height,
+        sx,
+        sy,
+        sw,
+        sh,
+        minLuma,
+        contrast
+      );
     }
 
-    // 7. Apply Temporal Smoothing & Hysteresis Lock
+    // 6. Apply Temporal Smoothing & Hysteresis
     if (resolvedCorners) {
-      CornerFinder.lockDecay = 15; // Retain lock for up to 15 frames (~500ms) across blurs
-      CornerFinder.lockStreak = Math.min(25, CornerFinder.lockStreak + 1);
+      CornerFinder.lockDecay = 15; // 15 frames (~500ms) memory across camera blurs
+      CornerFinder.lockStreak = Math.min(30, CornerFinder.lockStreak + 1);
 
       let finalCorners = resolvedCorners;
       if (CornerFinder.lastValidCorners) {
-        // High-stability exponential smoothing (82% memory / 18% measurement)
-        const alpha = 0.82;
+        // High-stability exponential moving average (80% memory / 20% measurement)
+        const alpha = 0.80;
         finalCorners = {
           topLeft: CornerFinder.lerpPoint(CornerFinder.lastValidCorners.topLeft, resolvedCorners.topLeft, alpha),
           topRight: CornerFinder.lerpPoint(CornerFinder.lastValidCorners.topRight, resolvedCorners.topRight, alpha),
@@ -244,32 +206,158 @@ export class CornerFinder {
   }
 
   /**
-   * Validates whether 5 run lengths conform to the 1:1:3:1:1 module ratio
+   * Scans horizontal lines in the region and cross-checks matching vertical columns
    */
-  private static checkRatio(stateCount: number[]): boolean {
-    const total = stateCount[0] + stateCount[1] + stateCount[2] + stateCount[3] + stateCount[4];
-    if (total < 7) return false;
-    const moduleSize = total / 7;
-    const maxVar = moduleSize * 0.58; // Allow up to 58% variance for perspective tilt
+  private static scanForCandidates(
+    data: Uint8ClampedArray,
+    width: number,
+    height: number,
+    sx: number,
+    sy: number,
+    sw: number,
+    sh: number,
+    threshold: number
+  ): FinderCandidate[] {
+    const candidates: FinderCandidate[] = [];
+    const rowStep = Math.max(2, Math.round(sh / 100));
 
-    return (
-      Math.abs(moduleSize - stateCount[0]) < maxVar &&
-      Math.abs(moduleSize - stateCount[1]) < maxVar &&
-      Math.abs(3 * moduleSize - stateCount[2]) < 3 * maxVar &&
-      Math.abs(moduleSize - stateCount[3]) < maxVar &&
-      Math.abs(moduleSize - stateCount[4]) < maxVar
-    );
+    for (let y = sy + 3; y < sy + sh - 3; y += rowStep) {
+      const runs = CornerFinder.extractRowRuns(data, width, height, y, sx, sx + sw, threshold);
+
+      for (let i = 0; i <= runs.length - 5; i++) {
+        // Pattern sequence: Light -> Dark -> Light (core) -> Dark -> Light
+        if (
+          runs[i].isLight &&
+          !runs[i + 1].isLight &&
+          runs[i + 2].isLight &&
+          !runs[i + 3].isLight &&
+          runs[i + 4].isLight
+        ) {
+          const d0 = runs[i].len;
+          const d1 = runs[i + 1].len;
+          const d2 = runs[i + 2].len;
+          const d3 = runs[i + 3].len;
+          const d4 = runs[i + 4].len;
+
+          const totalH = d0 + d1 + d2 + d3 + d4;
+          const moduleH = totalH / 7;
+          if (moduleH < 2) continue;
+
+          const maxVarH = moduleH * 0.65;
+          if (
+            Math.abs(moduleH - d0) < maxVarH &&
+            Math.abs(moduleH - d1) < maxVarH &&
+            Math.abs(3 * moduleH - d2) < 3 * maxVarH &&
+            Math.abs(moduleH - d3) < maxVarH &&
+            Math.abs(moduleH - d4) < maxVarH
+          ) {
+            const candX = runs[i].startX + d0 + d1 + d2 / 2;
+
+            // Cross check vertically at candX
+            const vRes = CornerFinder.crossCheckVerticalRuns(
+              data,
+              width,
+              height,
+              Math.round(candX),
+              y,
+              moduleH,
+              threshold,
+              sy,
+              sy + sh
+            );
+
+            if (vRes !== null) {
+              candidates.push({
+                x: candX,
+                y: vRes.y,
+                moduleSize: (moduleH + vRes.moduleSize) / 2,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    return candidates;
+  }
+
+  /**
+   * Compresses horizontal scanline pixels into consecutive run lengths
+   */
+  private static extractRowRuns(
+    data: Uint8ClampedArray,
+    width: number,
+    height: number,
+    y: number,
+    minX: number,
+    maxX: number,
+    threshold: number
+  ): Run[] {
+    const runs: Run[] = [];
+    if (minX >= maxX) return runs;
+
+    let isLight = CornerFinder.getLuma(data, width, height, minX, y) >= threshold;
+    let runLen = 1;
+    let startX = minX;
+
+    for (let x = minX + 1; x < maxX; x++) {
+      const pixelLight = CornerFinder.getLuma(data, width, height, x, y) >= threshold;
+      if (pixelLight === isLight) {
+        runLen++;
+      } else {
+        runs.push({ isLight, len: runLen, startX });
+        isLight = pixelLight;
+        runLen = 1;
+        startX = x;
+      }
+    }
+    runs.push({ isLight, len: runLen, startX });
+    return runs;
+  }
+
+  /**
+   * Compresses vertical scanline pixels into consecutive run lengths
+   */
+  private static extractColRuns(
+    data: Uint8ClampedArray,
+    width: number,
+    height: number,
+    cx: number,
+    minY: number,
+    maxY: number,
+    threshold: number
+  ): ColRun[] {
+    const runs: ColRun[] = [];
+    if (minY >= maxY) return runs;
+
+    let isLight = CornerFinder.getLuma(data, width, height, cx, minY) >= threshold;
+    let runLen = 1;
+    let startY = minY;
+
+    for (let y = minY + 1; y < maxY; y++) {
+      const pixelLight = CornerFinder.getLuma(data, width, height, cx, y) >= threshold;
+      if (pixelLight === isLight) {
+        runLen++;
+      } else {
+        runs.push({ isLight, len: runLen, startY });
+        isLight = pixelLight;
+        runLen = 1;
+        startY = y;
+      }
+    }
+    runs.push({ isLight, len: runLen, startY });
+    return runs;
   }
 
   /**
    * Cross-checks a candidate finder pattern vertically at column cx
    */
-  private static crossCheckVertical(
+  private static crossCheckVerticalRuns(
     data: Uint8ClampedArray,
     width: number,
     height: number,
     cx: number,
-    startRow: number,
+    rowY: number,
     moduleH: number,
     threshold: number,
     minY: number,
@@ -277,69 +365,47 @@ export class CornerFinder {
   ): { y: number; moduleSize: number } | null {
     if (cx < 0 || cx >= width) return null;
 
-    // Scan up within light center core
-    let coreUp = 0;
-    while (startRow - coreUp >= minY && CornerFinder.getLuma(data, width, height, cx, startRow - coreUp) >= threshold) {
-      coreUp++;
+    const colRuns = CornerFinder.extractColRuns(data, width, height, cx, minY, maxY, threshold);
+
+    for (let j = 0; j <= colRuns.length - 5; j++) {
+      if (
+        colRuns[j].isLight &&
+        !colRuns[j + 1].isLight &&
+        colRuns[j + 2].isLight &&
+        !colRuns[j + 3].isLight &&
+        colRuns[j + 4].isLight
+      ) {
+        const coreYStart = colRuns[j + 2].startY;
+        const coreYEnd = coreYStart + colRuns[j + 2].len;
+
+        // Verify that rowY intersects or touches the center core
+        if (rowY >= coreYStart - 2 && rowY <= coreYEnd + 2) {
+          const v0 = colRuns[j].len;
+          const v1 = colRuns[j + 1].len;
+          const v2 = colRuns[j + 2].len;
+          const v3 = colRuns[j + 3].len;
+          const v4 = colRuns[j + 4].len;
+
+          const vTotal = v0 + v1 + v2 + v3 + v4;
+          const vMod = vTotal / 7;
+
+          if (Math.abs(vMod - moduleH) <= moduleH * 0.65) {
+            const maxVarV = vMod * 0.65;
+            if (
+              Math.abs(vMod - v0) < maxVarV &&
+              Math.abs(vMod - v1) < maxVarV &&
+              Math.abs(3 * vMod - v2) < 3 * maxVarV &&
+              Math.abs(vMod - v3) < maxVarV &&
+              Math.abs(vMod - v4) < maxVarV
+            ) {
+              const candY = colRuns[j].startY + v0 + v1 + v2 / 2;
+              return { y: candY, moduleSize: vMod };
+            }
+          }
+        }
+      }
     }
-    if (coreUp === 0 || startRow - coreUp < minY) return null;
-
-    // Scan up within dark ring
-    let darkRingUp = 0;
-    while (startRow - coreUp - darkRingUp >= minY && CornerFinder.getLuma(data, width, height, cx, startRow - coreUp - darkRingUp) < threshold) {
-      darkRingUp++;
-    }
-    if (darkRingUp === 0 || startRow - coreUp - darkRingUp < minY) return null;
-
-    // Scan up within outer light border
-    let outerLightUp = 0;
-    while (startRow - coreUp - darkRingUp - outerLightUp >= minY && CornerFinder.getLuma(data, width, height, cx, startRow - coreUp - darkRingUp - outerLightUp) >= threshold) {
-      outerLightUp++;
-    }
-    if (outerLightUp === 0) return null;
-
-    // Scan down within light center core
-    let coreDown = 1;
-    while (startRow + coreDown <= maxY && CornerFinder.getLuma(data, width, height, cx, startRow + coreDown) >= threshold) {
-      coreDown++;
-    }
-    if (startRow + coreDown > maxY) return null;
-
-    // Scan down within dark ring
-    let darkRingDown = 0;
-    while (startRow + coreDown + darkRingDown <= maxY && CornerFinder.getLuma(data, width, height, cx, startRow + coreDown + darkRingDown) < threshold) {
-      darkRingDown++;
-    }
-    if (darkRingDown === 0 || startRow + coreDown + darkRingDown > maxY) return null;
-
-    // Scan down within outer light border
-    let outerLightDown = 0;
-    while (startRow + coreDown + darkRingDown + outerLightDown <= maxY && CornerFinder.getLuma(data, width, height, cx, startRow + coreDown + darkRingDown + outerLightDown) >= threshold) {
-      outerLightDown++;
-    }
-    if (outerLightDown === 0) return null;
-
-    const vRuns = [outerLightUp, darkRingUp, coreUp + coreDown - 1, darkRingDown, outerLightDown];
-    const totalV = vRuns[0] + vRuns[1] + vRuns[2] + vRuns[3] + vRuns[4];
-    if (totalV < 7) return null;
-
-    const moduleV = totalV / 7;
-    // Ensure vertical module size agrees with horizontal module size within 48%
-    if (Math.abs(moduleV - moduleH) > 0.48 * moduleH) return null;
-
-    const maxVarV = moduleV * 0.58;
-    if (
-      Math.abs(moduleV - vRuns[0]) > maxVarV ||
-      Math.abs(moduleV - vRuns[1]) > maxVarV ||
-      Math.abs(3 * moduleV - vRuns[2]) > 3 * maxVarV ||
-      Math.abs(moduleV - vRuns[3]) > maxVarV ||
-      Math.abs(moduleV - vRuns[4]) > maxVarV
-    ) {
-      return null;
-    }
-
-    const centerY = startRow + (coreDown - 1 - coreUp) / 2;
-    return { y: centerY, moduleSize: moduleV };
+    return null;
   }
 
   /**
@@ -351,7 +417,6 @@ export class CornerFinder {
     width: number,
     height: number
   ): QuadCorners {
-    // If more than 4, select the 4 that form the largest bounding area
     let selected = points;
     if (points.length > 4) {
       const cx = points.reduce((acc, p) => acc + p.x, 0) / points.length;
@@ -364,13 +429,12 @@ export class CornerFinder {
     for (let i = 0; i < selected.length; i++) {
       const p = selected[i];
       const rgb = CornerFinder.getRGB(data, width, height, Math.round(p.x), Math.round(p.y));
-      if (rgb.b > 1.25 * rgb.r && rgb.g > 1.25 * rgb.r && rgb.b > 80) {
+      if (rgb.b > 1.25 * rgb.r && rgb.g > 1.25 * rgb.r && rgb.b > 70) {
         tlIdx = i;
         break;
       }
     }
 
-    // Geometrical sorting relative to centroid
     const center = {
       x: selected.reduce((sum, p) => sum + p.x, 0) / 4,
       y: selected.reduce((sum, p) => sum + p.y, 0) / 4,
@@ -384,21 +448,16 @@ export class CornerFinder {
     if (tlIdx >= 0) {
       ptTL = selected[tlIdx];
       const others = selected.filter((_, i) => i !== tlIdx);
-      // Sort others by angle relative to center
-      others.sort((a, b) => {
-        const angA = Math.atan2(a.y - center.y, a.x - center.x);
-        const angB = Math.atan2(b.y - center.y, b.x - center.x);
-        return angA - angB;
-      });
-      // The opposite point across center is Bottom-Right
-      const sortedByDistToOpposite = [...others].sort((a, b) => {
+
+      // Find opposite corner across center (Bottom-Right)
+      const sortedByOpposite = [...others].sort((a, b) => {
         const dA = (a.x - center.x) * (ptTL.x - center.x) + (a.y - center.y) * (ptTL.y - center.y);
         const dB = (b.x - center.x) * (ptTL.x - center.x) + (b.y - center.y) * (ptTL.y - center.y);
-        return dA - dB; // Most negative dot product is opposite
+        return dA - dB;
       });
-      ptBR = sortedByDistToOpposite[0];
+      ptBR = sortedByOpposite[0];
+
       const remaining = others.filter((p) => p !== ptBR);
-      // Cross product to distinguish TR from BL
       const vTL_BR = { x: ptBR.x - ptTL.x, y: ptBR.y - ptTL.y };
       const cross0 = vTL_BR.x * (remaining[0].y - ptTL.y) - vTL_BR.y * (remaining[0].x - ptTL.x);
       if (cross0 > 0) {
@@ -435,7 +494,6 @@ export class CornerFinder {
     height: number
   ): QuadCorners {
     const [p0, p1, p2] = points;
-    // Find right-angle corner P: minimum absolute dot product
     const dot0 = Math.abs((p1.x - p0.x) * (p2.x - p0.x) + (p1.y - p0.y) * (p2.y - p0.y));
     const dot1 = Math.abs((p0.x - p1.x) * (p2.x - p1.x) + (p0.y - p1.y) * (p2.y - p1.y));
     const dot2 = Math.abs((p0.x - p2.x) * (p1.x - p2.x) + (p0.y - p2.y) * (p1.y - p2.y));
@@ -452,9 +510,23 @@ export class CornerFinder {
       cornerP = p2; armA = p0; armB = p1;
     }
 
-    // Reconstruct 4th corner
     const opp = { x: armA.x + armB.x - cornerP.x, y: armA.y + armB.y - cornerP.y };
     return CornerFinder.assign4Corners([cornerP, armA, armB, opp], data, width, height);
+  }
+
+  /**
+   * 2-Corner geometric reconstruction
+   */
+  private static extrapolateFrom2Corners(p0: Point2D, p1: Point2D): QuadCorners {
+    const dx = p1.x - p0.x;
+    const dy = p1.y - p0.y;
+    // Assume p0 is TL, p1 is TR (or rotate)
+    return {
+      topLeft: p0,
+      topRight: p1,
+      bottomRight: { x: p1.x - dy, y: p1.y + dx },
+      bottomLeft: { x: p0.x - dy, y: p0.y + dx },
+    };
   }
 
   /**
@@ -471,18 +543,14 @@ export class CornerFinder {
     minLuma: number,
     contrast: number
   ): QuadCorners | null {
-    const fiducialInset = VisualFrameRenderer.FIDUCIAL_INSET;
-    const radius = Math.min(sw, sh) * 0.12;
+    const midX = sx + sw * 0.5;
+    const midY = sy + sh * 0.5;
 
-    const expectedTL: Point2D = { x: sx + sw * fiducialInset, y: sy + sh * fiducialInset };
-    const expectedTR: Point2D = { x: sx + sw * (1 - fiducialInset), y: sy + sh * fiducialInset };
-    const expectedBR: Point2D = { x: sx + sw * (1 - fiducialInset), y: sy + sh * (1 - fiducialInset) };
-    const expectedBL: Point2D = { x: sx + sw * fiducialInset, y: sy + sh * (1 - fiducialInset) };
-
-    const ptTL = CornerFinder.sampleQuadrantCentroid(data, width, height, expectedTL, radius, minLuma, contrast);
-    const ptTR = CornerFinder.sampleQuadrantCentroid(data, width, height, expectedTR, radius, minLuma, contrast);
-    const ptBR = CornerFinder.sampleQuadrantCentroid(data, width, height, expectedBR, radius, minLuma, contrast);
-    const ptBL = CornerFinder.sampleQuadrantCentroid(data, width, height, expectedBL, radius, minLuma, contrast);
+    // Search 4 quadrants around the reticle
+    const ptTL = CornerFinder.sampleQuadrantCentroid(data, width, height, sx, midX, sy, midY, minLuma, contrast);
+    const ptTR = CornerFinder.sampleQuadrantCentroid(data, width, height, midX, sx + sw, sy, midY, minLuma, contrast);
+    const ptBR = CornerFinder.sampleQuadrantCentroid(data, width, height, midX, sx + sw, midY, sy + sh, minLuma, contrast);
+    const ptBL = CornerFinder.sampleQuadrantCentroid(data, width, height, sx, midX, midY, sy + sh, minLuma, contrast);
 
     let count = 0;
     if (ptTL) count++;
@@ -509,27 +577,30 @@ export class CornerFinder {
     data: Uint8ClampedArray,
     width: number,
     height: number,
-    center: Point2D,
-    radius: number,
+    minX: number,
+    maxX: number,
+    minY: number,
+    maxY: number,
     minLuma: number,
     contrast: number
   ): Point2D | null {
-    const minX = Math.max(0, Math.round(center.x - radius));
-    const maxX = Math.min(width - 1, Math.round(center.x + radius));
-    const minY = Math.max(0, Math.round(center.y - radius));
-    const maxY = Math.min(height - 1, Math.round(center.y + radius));
+    const qMinX = Math.max(0, Math.round(minX));
+    const qMaxX = Math.min(width - 1, Math.round(maxX));
+    const qMinY = Math.max(0, Math.round(minY));
+    const qMaxY = Math.min(height - 1, Math.round(maxY));
 
-    const threshold = minLuma + contrast * 0.55;
+    if (qMaxX <= qMinX + 10 || qMaxY <= qMinY + 10) return null;
+
+    const threshold = minLuma + contrast * 0.52;
     let sumX = 0;
     let sumY = 0;
     let totalWeight = 0;
 
-    for (let y = minY; y <= maxY; y += 2) {
-      for (let x = minX; x <= maxX; x += 2) {
+    for (let y = qMinY; y <= qMaxY; y += 3) {
+      for (let x = qMinX; x <= qMaxX; x += 3) {
         const luma = CornerFinder.getLuma(data, width, height, x, y);
         if (luma > threshold) {
-          const d = Math.hypot(x - center.x, y - center.y);
-          const weight = (luma - threshold) * Math.max(0.1, 1 - d / radius);
+          const weight = luma - threshold;
           sumX += x * weight;
           sumY += y * weight;
           totalWeight += weight;
@@ -537,7 +608,7 @@ export class CornerFinder {
       }
     }
 
-    if (totalWeight < 40) return null;
+    if (totalWeight < 50) return null;
     return { x: sumX / totalWeight, y: sumY / totalWeight };
   }
 
