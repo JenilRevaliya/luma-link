@@ -70,17 +70,60 @@ export class CornerFinder {
     if (ptBR) fiducialsFound++;
     if (ptBL) fiducialsFound++;
 
-    // 3. Extrapolate missing corner if 3 of 4 are detected with high confidence
+    // 3. Extrapolate missing corners if 3 or 2 are detected with high confidence
     if (fiducialsFound === 3) {
       if (!ptTL && ptTR && ptBR && ptBL) ptTL = { x: ptTR.x + ptBL.x - ptBR.x, y: ptTR.y + ptBL.y - ptBR.y };
       else if (!ptTR && ptTL && ptBR && ptBL) ptTR = { x: ptTL.x + ptBR.x - ptBL.x, y: ptTL.y + ptBR.y - ptBL.y };
       else if (!ptBR && ptTL && ptTR && ptBL) ptBR = { x: ptTR.x + ptBL.x - ptTL.x, y: ptTR.y + ptBL.y - ptTL.y };
       else if (!ptBL && ptTL && ptTR && ptBR) ptBL = { x: ptTL.x + ptBR.x - ptTR.x, y: ptTL.y + ptBR.y - ptTR.y };
       fiducialsFound = 4;
+    } else if (fiducialsFound === 2) {
+      // 2-corner geometric reconstruction when extreme glare blinds 2 corners
+      if (ptTL && ptTR) {
+        const ux = ptTR.x - ptTL.x;
+        const uy = ptTR.y - ptTL.y;
+        ptBL = { x: ptTL.x - uy, y: ptTL.y + ux };
+        ptBR = { x: ptTR.x - uy, y: ptTR.y + ux };
+        fiducialsFound = 4;
+      } else if (ptBL && ptBR) {
+        const ux = ptBR.x - ptBL.x;
+        const uy = ptBR.y - ptBL.y;
+        ptTL = { x: ptBL.x + uy, y: ptBL.y - ux };
+        ptTR = { x: ptBR.x + uy, y: ptBR.y - ux };
+        fiducialsFound = 4;
+      } else if (ptTL && ptBL) {
+        const wx = ptBL.x - ptTL.x;
+        const wy = ptBL.y - ptTL.y;
+        ptTR = { x: ptTL.x - wy, y: ptTL.y + wx };
+        ptBR = { x: ptBL.x - wy, y: ptBL.y + wx };
+        fiducialsFound = 4;
+      } else if (ptTR && ptBR) {
+        const wx = ptBR.x - ptTR.x;
+        const wy = ptBR.y - ptTR.y;
+        ptTL = { x: ptTR.x + wy, y: ptTR.y - wx };
+        ptBL = { x: ptBR.x + wy, y: ptBR.y - wx };
+        fiducialsFound = 4;
+      } else if (ptTL && ptBR) {
+        const cx = (ptTL.x + ptBR.x) * 0.5;
+        const cy = (ptTL.y + ptBR.y) * 0.5;
+        const dx = ptBR.x - ptTL.x;
+        const dy = ptBR.y - ptTL.y;
+        ptTR = { x: cx - dy * 0.5, y: cy + dx * 0.5 };
+        ptBL = { x: cx + dy * 0.5, y: cy - dx * 0.5 };
+        fiducialsFound = 4;
+      } else if (ptTR && ptBL) {
+        const cx = (ptTR.x + ptBL.x) * 0.5;
+        const cy = (ptTR.y + ptBL.y) * 0.5;
+        const dx = ptTR.x - ptBL.x;
+        const dy = ptTR.y - ptBL.y;
+        ptTL = { x: cx - dy * 0.5, y: cy + dx * 0.5 };
+        ptBR = { x: cx + dy * 0.5, y: cy - dx * 0.5 };
+        fiducialsFound = 4;
+      }
     }
 
-    // 4. If fewer than 3 fiducials found, check if we can sustain a short-lived streak
-    if (fiducialsFound < 3 || !ptTL || !ptTR || !ptBR || !ptBL) {
+    // 4. If fewer than 2 fiducials found, check if we can sustain a short-lived streak
+    if (fiducialsFound < 4 || !ptTL || !ptTR || !ptBR || !ptBL) {
       if (CornerFinder.lockStreak > 0 && CornerFinder.lastValidCorners) {
         CornerFinder.lockStreak = Math.max(0, CornerFinder.lockStreak - 1);
         if (CornerFinder.lockStreak > 0) {
@@ -163,9 +206,9 @@ export class CornerFinder {
     }
 
     const contrast = maxLuma - minLuma;
-    if (contrast < 22) return null;
+    if (contrast < 18) return null;
 
-    const brightThreshold = minLuma + contrast * 0.50;
+    const brightThreshold = minLuma + contrast * 0.45;
 
     // 2. Sample candidates for concentric ring signature (bright dot, dark ring, bright ring)
     let bestScore = 0;
@@ -217,7 +260,7 @@ export class CornerFinder {
       }
     }
 
-    if (!bestCandidate || bestScore < 30) {
+    if (!bestCandidate || bestScore < 18) {
       // Fallback: search around expected center point if local contrast is present
       return CornerFinder.fallbackCentroid(data, width, height, expectedCenter, expectedDim * 0.18, minLuma, contrast);
     }

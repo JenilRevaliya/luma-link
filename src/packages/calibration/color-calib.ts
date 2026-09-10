@@ -166,12 +166,16 @@ export class ColorCalibrator {
       };
     }
 
-    // 2. Black Detection:
-    // Achromatic cells where all channels are low or desaturated
+    // 2. Black Detection (Achromatic / Desaturated):
+    // In LumaLink, the only symbols are Black, Red, Green, Blue (no White symbol).
+    // Specular glare from ceiling lights adds equal white light (ΔR = ΔG = ΔB).
+    // Therefore, any cell where no channel dominates (achromatic / low saturation)
+    // is unequivocally BLACK, even if glare lifts its luminance above 100!
+    const channelSpread = maxChannel - minChannel;
+    const isAchromatic = channelSpread < 22 || saturation < 0.20;
     const isDark = maxChannel < Math.max(65, this.dynamicBlackLuma) || luma < this.dynamicBlackLuma;
-    const isDesaturatedDark = maxChannel < 95 && saturation < 0.22;
 
-    if (isDark || isDesaturatedDark) {
+    if (isAchromatic || isDark) {
       const dist = Math.hypot(
         r - this.centroids[ColorIndex.BLACK].r,
         g - this.centroids[ColorIndex.BLACK].g,
@@ -180,7 +184,7 @@ export class ColorCalibrator {
       return {
         color: ColorIndex.BLACK,
         distance: dist,
-        confidence: Math.max(0.6, 1.0 - (maxChannel / 120)),
+        confidence: Math.max(0.65, 1.0 - saturation),
       };
     }
 

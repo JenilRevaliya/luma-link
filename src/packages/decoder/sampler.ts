@@ -22,6 +22,12 @@ export class MatrixSampler {
     const matrixFrac = VisualFrameRenderer.MATRIX_SIZE_FRAC;
     const cellSize = matrixFrac / MATRIX_SIZE;
 
+    // Dynamically estimate cell span in camera pixels to avoid sampling neighbor edges under blur
+    const p00 = homography.transform(matrixInset, matrixInset);
+    const p10 = homography.transform(matrixInset + cellSize, matrixInset);
+    const cellPixelSpan = Math.hypot(p10.x - p00.x, p10.y - p00.y);
+    const kernelRadius = Math.max(1, Math.min(3, Math.floor(cellPixelSpan * 0.16)));
+
     for (let r = 0; r < MATRIX_SIZE; r++) {
       for (let c = 0; c < MATRIX_SIZE; c++) {
         const idx = r * MATRIX_SIZE + c;
@@ -33,8 +39,8 @@ export class MatrixSampler {
         // Map to camera coordinates
         const pt = homography.transform(u, v);
 
-        // Sample 3x3 kernel around the mapped center
-        const rgb = MatrixSampler.sampleKernel(data, width, height, pt.x, pt.y);
+        // Sample Gaussian center-weighted kernel around mapped center (immune to neighbor blur)
+        const rgb = MatrixSampler.sampleKernel(data, width, height, pt.x, pt.y, kernelRadius);
         colors[idx] = rgb;
       }
     }
@@ -58,15 +64,16 @@ export class MatrixSampler {
     const qBR = homography.transform(0.65, 0.65);
 
     return {
-      black: MatrixSampler.sampleKernel(data, width, height, qTL.x, qTL.y, 5),
-      red:   MatrixSampler.sampleKernel(data, width, height, qTR.x, qTR.y, 5),
-      green: MatrixSampler.sampleKernel(data, width, height, qBL.x, qBL.y, 5),
-      blue:  MatrixSampler.sampleKernel(data, width, height, qBR.x, qBR.y, 5),
+      black: MatrixSampler.sampleKernel(data, width, height, qTL.x, qTL.y, 4),
+      red:   MatrixSampler.sampleKernel(data, width, height, qTR.x, qTR.y, 4),
+      green: MatrixSampler.sampleKernel(data, width, height, qBL.x, qBL.y, 4),
+      blue:  MatrixSampler.sampleKernel(data, width, height, qBR.x, qBR.y, 4),
     };
   }
 
   /**
-   * Samples a small NxN kernel around (cx, cy)
+   * Samples a Gaussian center-weighted NxN kernel around (cx, cy)
+   * Exponentially suppresses cell border pixels to prevent blur/motion color bleeding
    */
   private static sampleKernel(
     data: Uint8ClampedArray,
@@ -79,10 +86,12 @@ export class MatrixSampler {
     let sumR = 0;
     let sumG = 0;
     let sumB = 0;
-    let count = 0;
+    let totalWeight = 0;
 
     const pxCenter = Math.round(cx);
     const pyCenter = Math.round(cy);
+    const sigma = Math.max(0.65, kernelRadius * 0.55);
+    const twoSigmaSq = 2 * sigma * sigma;
 
     for (let dy = -kernelRadius; dy <= kernelRadius; dy++) {
       for (let dx = -kernelRadius; dx <= kernelRadius; dx++) {
@@ -90,20 +99,22 @@ export class MatrixSampler {
         const y = pyCenter + dy;
 
         if (x >= 0 && x < imgWidth && y >= 0 && y < imgHeight) {
+          const distSq = dx * dx + dy * dy;
+          const weight = Math.exp(-distSq / twoSigmaSq);
           const idx = (y * imgWidth + x) * 4;
-          sumR += data[idx];
-          sumG += data[idx + 1];
-          sumB += data[idx + 2];
-          count++;
+          sumR += data[idx] * weight;
+          sumG += data[idx + 1] * weight;
+          sumB += data[idx + 2] * weight;
+          totalWeight += weight;
         }
       }
     }
 
-    if (count === 0) return { r: 0, g: 0, b: 0 };
+    if (totalWeight === 0) return { r: 0, g: 0, b: 0 };
     return {
-      r: Math.round(sumR / count),
-      g: Math.round(sumG / count),
-      b: Math.round(sumB / count),
+      r: Math.round(sumR / totalWeight),
+      g: Math.round(sumG / totalWeight),
+      b: Math.round(sumB / totalWeight),
     };
   }
 }

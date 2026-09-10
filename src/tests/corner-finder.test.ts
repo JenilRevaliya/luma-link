@@ -88,6 +88,26 @@ describe('CornerFinder & Optical Calibration', () => {
     expect(blackCell.color).toBe(ColorIndex.BLACK);
   });
 
+  it('classifies cells under extreme specular glare and over-exposure correctly', () => {
+    const calibrator = new ColorCalibrator();
+
+    // Washed-out Black under harsh specular ceiling reflection (luma ~135, high brightness but achromatic)
+    const glareBlack = calibrator.classify(134, 137, 135);
+    expect(glareBlack.color).toBe(ColorIndex.BLACK);
+
+    // Over-exposed clipped Green (camera sensor saturation at 255 with channel leakage)
+    const overexposedGreen = calibrator.classify(180, 255, 180);
+    expect(overexposedGreen.color).toBe(ColorIndex.GREEN);
+
+    // Over-exposed clipped Red under sunlight
+    const overexposedRed = calibrator.classify(255, 175, 175);
+    expect(overexposedRed.color).toBe(ColorIndex.RED);
+
+    // Over-exposed clipped Blue
+    const overexposedBlue = calibrator.classify(170, 170, 255);
+    expect(overexposedBlue.color).toBe(ColorIndex.BLUE);
+  });
+
   it('returns null on noise image with no fiducials', () => {
     const width = 400;
     const height = 400;

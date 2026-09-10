@@ -283,6 +283,19 @@ export class ReceiverApp {
       await this.videoEl.play();
 
       const track = stream.getVideoTracks()[0];
+      // Try enabling continuous auto-focus and auto-exposure to eliminate blur and over-exposure
+      try {
+        const capabilities: any = (track as any).getCapabilities ? (track as any).getCapabilities() : {};
+        const advancedOpts: any = {};
+        if (capabilities.focusMode?.includes('continuous')) advancedOpts.focusMode = 'continuous';
+        if (capabilities.exposureMode?.includes('continuous')) advancedOpts.exposureMode = 'continuous';
+        if (Object.keys(advancedOpts).length > 0) {
+          await track.applyConstraints({ advanced: [advancedOpts] } as any);
+          debugLogger.info('CAM', `Applied continuous auto-focus and auto-exposure constraints: ${JSON.stringify(advancedOpts)}`);
+        }
+      } catch {
+        // Non-blocking fallback for browsers without advanced constraint support
+      }
       const settings = track.getSettings();
       const w = settings.width || 1280;
       const h = settings.height || 720;

@@ -64,10 +64,10 @@ export interface RGBColor {
 }
 
 export const DEFAULT_PALETTE: Record<ColorIndexValue, RGBColor> = {
-  [ColorIndex.BLACK]: { r: 18, g: 18, b: 20 },
-  [ColorIndex.RED]:   { r: 245, g: 45, b: 65 },
-  [ColorIndex.GREEN]: { r: 35, g: 215, b: 95 },
-  [ColorIndex.BLUE]:  { r: 30, g: 130, b: 255 },
+  [ColorIndex.BLACK]: { r: 10, g: 10, b: 12 },
+  [ColorIndex.RED]:   { r: 255, g: 20, b: 25 },
+  [ColorIndex.GREEN]: { r: 15, g: 245, b: 45 },
+  [ColorIndex.BLUE]:  { r: 15, g: 90, b: 255 },
 };
 
 export const REFERENCE_WHITE: RGBColor = { r: 250, g: 250, b: 250 };
