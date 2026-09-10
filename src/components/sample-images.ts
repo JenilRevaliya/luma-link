@@ -168,3 +168,27 @@ export const SAMPLE_PRESETS: SamplePreset[] = [
     },
   },
 ];
+
+export interface TextPreset {
+  id: string;
+  name: string;
+  text: string;
+}
+
+export const SAMPLE_TEXT_PRESETS: TextPreset[] = [
+  {
+    id: 'confidential-note',
+    name: 'Classified Note',
+    text: 'LUMALINK AIRGAP OPTICAL PROTOCOL\n\nTransfer Mode: Screen-to-Camera\nPayload: AES-GCM 128-bit encrypted\nAuthentication: Verified Tag\nNetwork Status: Offline (Air-Gapped)\nDate: September 2026',
+  },
+  {
+    id: 'wifi-credentials',
+    name: 'Wi-Fi Credentials',
+    text: 'NETWORK: LumaLink_Secure_5G\nPASSWORD: x9!vQ#882_AlphaZero\nSECURITY: WPA3-Personal\nGATEWAY: 192.168.1.1',
+  },
+  {
+    id: 'crypto-key',
+    name: 'JSON Token',
+    text: '{"protocol":"LumaLink-v1","key_id":"0x882A","status":"authenticated","created":1789000000}',
+  },
+];

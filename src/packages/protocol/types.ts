@@ -73,10 +73,18 @@ export const DEFAULT_PALETTE: Record<ColorIndexValue, RGBColor> = {
 export const REFERENCE_WHITE: RGBColor = { r: 250, g: 250, b: 250 };
 export const REFERENCE_BLACK: RGBColor = { r: 15, g: 15, b: 18 };
 
+export type PayloadMimeType =
+  | 'image/webp'
+  | 'image/jpeg'
+  | 'text/plain'
+  | 'application/json'
+  | 'multipart/image+text'
+  | 'application/octet-stream';
+
 export interface SessionMetadata {
   sessionId: number;
   totalBytes: number;
-  mimeType: 'image/webp' | 'image/jpeg' | 'application/octet-stream';
+  mimeType: PayloadMimeType;
   width: number;
   height: number;
   totalPackets: number;
@@ -88,10 +96,9 @@ export interface SessionMetadata {
 export type ReceiverState =
   | 'IDLE'
   | 'SEARCHING'
-  | 'FOUND'
+  | 'DETECTED'
   | 'CALIBRATING'
-  | 'SYNC'
-  | 'RECEIVING'
+  | 'TRANSMITTING'
   | 'COMPLETE'
   | 'ERROR';
 

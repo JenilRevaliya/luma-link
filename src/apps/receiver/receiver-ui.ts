@@ -1,5 +1,7 @@
 /**
  * LumaLink Optical Receiver Interface
+ * Features gap-aware segmented progress bar, initial pickup detection,
+ * transmission telemetry, and multi-format reconstruction (Image, Text, Image+Caption)
  */
 
 import { VisionPipeline } from '../../packages/decoder/vision-pipeline';
@@ -39,6 +41,7 @@ export class ReceiverApp {
   public render(): void {
     this.container.innerHTML = `
       <div class="receiver-view">
+        <!-- Camera Viewport Column -->
         <div class="glass-panel receiver-camera-panel">
           <div class="panel-header">
             <div class="panel-title">
@@ -84,7 +87,7 @@ export class ReceiverApp {
           </div>
         </div>
 
-        <!-- Telemetry & Received Data Panel -->
+        <!-- Telemetry, Segmented Progress Bar & Results Column -->
         <div class="glass-panel receiver-status-panel">
           <div class="panel-header">
             <div class="panel-title">
@@ -93,14 +96,39 @@ export class ReceiverApp {
             <span class="badge badge-cyan" id="rx-session-badge">SESSION: --</span>
           </div>
 
-          <!-- Progress Bar -->
+          <!-- Live Data Packet Banner -->
+          <div class="packet-live-banner" id="packet-live-banner">
+            <div class="banner-col">
+              <span class="banner-lbl">CURRENT DATA PACKET</span>
+              <span class="banner-val font-mono text-cyan" id="rx-live-packet-idx">WAITING FOR FRAMES</span>
+            </div>
+            <div class="banner-col">
+              <span class="banner-lbl">CHANNEL STATUS</span>
+              <span class="banner-val font-mono" id="rx-channel-status">STANDBY</span>
+            </div>
+          </div>
+
+          <!-- Segmented / Gap-Aware Progress Section -->
           <div class="progress-section">
             <div class="progress-labels">
-              <span class="text-muted">Packets Collected</span>
+              <span class="text-muted">Transmission Progress (Fountain Reassembly)</span>
               <span class="font-mono text-cyan" id="rx-packet-count">0 / 0 (0%)</span>
             </div>
-            <div class="progress-bar-container">
-              <div class="progress-bar-fill" id="rx-progress-bar" style="width: 0%;"></div>
+
+            <!-- Segmented Visual Track Canvas -->
+            <div class="segmented-track-wrapper">
+              <canvas id="segmented-progress-canvas" width="600" height="24"></canvas>
+              <!-- Marker for Initial Pickup Point -->
+              <div class="pickup-marker" id="pickup-marker" style="display: none;">
+                <span class="marker-arrow">▲</span>
+                <span class="marker-label" id="pickup-marker-label">PICKED UP AT PKT #0</span>
+              </div>
+            </div>
+
+            <!-- Head Gap / Loop Status Notice -->
+            <div class="head-gap-notice" id="head-gap-notice" style="display: none;">
+              <span class="notice-icon">ℹ</span>
+              <span id="head-gap-text">Waiting for loop 2 to backfill missing head...</span>
             </div>
           </div>
 
@@ -115,22 +143,41 @@ export class ReceiverApp {
             </div>
           </div>
 
-          <!-- Decoded Image Result Card -->
+          <!-- Reconstructed Result Card: Photo Mode -->
           <div class="received-image-card" id="received-image-card" style="display: none;">
             <div class="received-card-header">
-              <span class="badge badge-success">✓ RECONSTRUCTION COMPLETE</span>
+              <span class="badge badge-success">✓ PHOTO RECONSTRUCTED</span>
               <span class="badge badge-accent" id="res-size-badge">0 KB</span>
             </div>
             <div class="received-image-wrapper">
-              <img id="received-image-img" alt="Reconstructed LumaLink Transfer" />
+              <img id="received-image-img" alt="Reconstructed Optical Image" />
             </div>
             <div class="received-card-meta" id="received-card-meta">
               <span>Resolution: 384×384</span>
               <span>AES-GCM Authenticated ✓</span>
             </div>
+            <div id="received-caption-box" class="received-caption-box" style="display: none;"></div>
             <a class="btn btn-primary btn-block" id="btn-download-image" download="lumalink_received.webp">
               ⤓ SAVE RECONSTRUCTED IMAGE
             </a>
+          </div>
+
+          <!-- Reconstructed Result Card: Text / Note Mode -->
+          <div class="received-text-card" id="received-text-card" style="display: none;">
+            <div class="received-card-header">
+              <span class="badge badge-success">✓ TEXT DECODED</span>
+              <span class="badge badge-accent" id="res-text-size-badge">0 BYTES</span>
+            </div>
+            <div class="terminal-text-container">
+              <pre id="received-text-content"></pre>
+            </div>
+            <div class="received-card-meta">
+              <span id="text-meta-chars">0 characters</span>
+              <span class="text-emerald">AES-GCM Authenticated ✓</span>
+            </div>
+            <button class="btn btn-primary btn-block" id="btn-copy-text">
+              📋 COPY TO CLIPBOARD
+            </button>
           </div>
 
           <!-- Live Channel Metrics -->
@@ -144,12 +191,12 @@ export class ReceiverApp {
               <span class="metric-val" id="metric-confidence">0%</span>
             </div>
             <div class="metric-card">
-              <span class="metric-label">Symbol Dist</span>
-              <span class="metric-val" id="metric-dist">0.0</span>
+              <span class="metric-label">Pickup Point</span>
+              <span class="metric-val text-cyan" id="metric-pickup">NONE</span>
             </div>
             <div class="metric-card">
-              <span class="metric-label">Decrypted</span>
-              <span class="metric-val text-cyan" id="metric-crypto">READY</span>
+              <span class="metric-label">Fountain Loop</span>
+              <span class="metric-val text-emerald" id="metric-loop">LOOP 1</span>
             </div>
           </div>
         </div>
@@ -168,6 +215,7 @@ export class ReceiverApp {
     const stopBtn = this.container.querySelector('#btn-stop-cam') as HTMLButtonElement;
     const resetBtn = this.container.querySelector('#btn-reset-rx') as HTMLButtonElement;
     const soundBtn = this.container.querySelector('#btn-toggle-sound') as HTMLButtonElement;
+    const copyBtn = this.container.querySelector('#btn-copy-text') as HTMLButtonElement;
 
     startBtn.addEventListener('click', () => this.startCamera());
     stopBtn.addEventListener('click', () => this.stopCamera());
@@ -178,6 +226,16 @@ export class ReceiverApp {
       soundBtn.textContent = soundManager.enabled ? '🔊 SOUND: ON' : '🔇 SOUND: OFF';
     });
 
+    copyBtn.addEventListener('click', () => {
+      const text = (this.container.querySelector('#received-text-content') as HTMLElement).textContent || '';
+      navigator.clipboard.writeText(text).then(() => {
+        copyBtn.textContent = '✓ COPIED TO CLIPBOARD!';
+        setTimeout(() => {
+          copyBtn.textContent = '📋 COPY TO CLIPBOARD';
+        }, 2000);
+      });
+    });
+
     // Setup Reassembler Callbacks
     this.reassembler.onProgress = (prog) => this.handleProgress(prog);
     this.reassembler.onComplete = (res) => this.handleComplete(res);
@@ -186,7 +244,6 @@ export class ReceiverApp {
 
   public async startCamera(): Promise<void> {
     try {
-      // Rear-facing camera with ideal 60fps and HD resolution constraints
       const constraints: MediaStreamConstraints = {
         video: {
           facingMode: { ideal: 'environment' },
@@ -202,7 +259,6 @@ export class ReceiverApp {
       this.videoEl.srcObject = stream;
       await this.videoEl.play();
 
-      // Inspect actual track capabilities and settings
       const track = stream.getVideoTracks()[0];
       const settings = track.getSettings();
       const w = settings.width || 1280;
@@ -215,9 +271,8 @@ export class ReceiverApp {
 
       this.startProcessingLoop();
     } catch (err) {
-      console.warn('Camera initiation failed (testing on non-mobile or blocked permissions):', err);
+      console.warn('Camera initiation fallback:', err);
       (this.container.querySelector('#rx-state-text') as HTMLElement).textContent = 'CAMERA ACCESS BLOCKED / UNAVAILABLE';
-      // Still start processing loop if external simulated frames are provided!
       if (this.externalFrameProvider) {
         this.startProcessingLoop();
       }
@@ -298,19 +353,23 @@ export class ReceiverApp {
     // Run Vision Pipeline
     const result = this.pipeline.processFrame(imgData, overrideCorners);
 
-    // Update state badge
-    this.updateStateUI(result.state, result.corners !== null);
+    // Update state badge & channel indicator
+    this.updateStateUI(result.state, result.decodedFrame !== null);
 
     // Update channel metrics
     (this.container.querySelector('#metric-calibrated') as HTMLElement).textContent = this.calibrator.isCalibrated ? 'YES' : 'PENDING';
     (this.container.querySelector('#metric-confidence') as HTMLElement).textContent = `${Math.round(result.averageConfidence * 100)}%`;
-    (this.container.querySelector('#metric-dist') as HTMLElement).textContent = result.averageDistance.toFixed(1);
 
     // Draw reticle tracking overlay
     this.drawReticleOverlay(result.corners);
 
-    // If a valid frame was decoded, ingest into reassembler
+    // If valid frame was decoded, update live telemetry and ingest
     if (result.decodedFrame) {
+      const hdr = result.decodedFrame.header;
+      (this.container.querySelector('#rx-live-packet-idx') as HTMLElement).textContent =
+        `PKT #${hdr.packetIndex} / ${hdr.totalPackets} (SEQ: ${hdr.sequenceNum})`;
+      (this.container.querySelector('#rx-channel-status') as HTMLElement).textContent = 'STREAMING ACTIVE ✓';
+
       this.reassembler.ingestFrame(result.decodedFrame);
       soundManager.playPacketTick();
     }
@@ -332,11 +391,8 @@ export class ReceiverApp {
     (this.container.querySelector('#targeting-reticle') as HTMLElement).classList.add('locked');
 
     // Draw polygon connecting detected corners
-    ctx.strokeStyle = '#00ff88';
+    ctx.strokeStyle = '#00e676';
     ctx.lineWidth = 3;
-    ctx.shadowColor = '#00ff88';
-    ctx.shadowBlur = 10;
-
     ctx.beginPath();
     ctx.moveTo(corners.topLeft.x, corners.topLeft.y);
     ctx.lineTo(corners.topRight.x, corners.topRight.y);
@@ -348,30 +404,38 @@ export class ReceiverApp {
     // Corner target circles
     const pts = [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft];
     pts.forEach((p, idx) => {
-      ctx.fillStyle = idx === 0 ? '#00f0ff' : '#00ff88';
+      ctx.fillStyle = idx === 0 ? '#00e5ff' : '#00e676';
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 8, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
       ctx.fill();
     });
   }
 
-  private updateStateUI(state: string, _hasCorners: boolean): void {
+  private updateStateUI(state: string, isTransmitting: boolean): void {
     const dot = this.container.querySelector('#rx-status-dot') as HTMLElement;
     const text = this.container.querySelector('#rx-state-text') as HTMLElement;
     const hint = this.container.querySelector('#reticle-hint') as HTMLElement;
 
     dot.className = 'status-dot';
 
+    if (isTransmitting) {
+      dot.classList.add('status-active');
+      text.textContent = 'TRANSMISSION IN PROGRESS';
+      hint.textContent = 'OPTICAL STREAM SYNCHRONIZED';
+      return;
+    }
+
     switch (state) {
       case 'SEARCHING':
         dot.classList.add('status-searching');
         text.textContent = 'SEARCHING FOR OPTICAL MATRIX';
-        hint.textContent = 'POINT REAR CAMERA AT SENDER DISPLAY';
+        hint.textContent = 'ALIGN SENDER SCREEN INSIDE BRACKETS';
         break;
       case 'FOUND':
+      case 'DETECTED':
         dot.classList.add('status-locking');
         text.textContent = 'LUMALINK DETECTED • LOCKING';
-        hint.textContent = 'HOLD STEADY...';
+        hint.textContent = 'FIDUCIALS ACQUIRED • HOLD STEADY';
         break;
       case 'CALIBRATING':
         dot.classList.add('status-calibrating');
@@ -380,8 +444,8 @@ export class ReceiverApp {
         break;
       case 'RECEIVING':
         dot.classList.add('status-active');
-        text.textContent = 'RECEIVING STREAMED PACKETS';
-        hint.textContent = 'SYNCHRONIZED';
+        text.textContent = 'TRANSMITTING / RECEIVING';
+        hint.textContent = 'STREAM SYNCHRONIZED';
         break;
     }
   }
@@ -389,7 +453,34 @@ export class ReceiverApp {
   private handleProgress(prog: ReassemblyProgress): void {
     (this.container.querySelector('#rx-session-badge') as HTMLElement).textContent = `SESSION: #${prog.sessionId.toString(16).toUpperCase()}`;
     (this.container.querySelector('#rx-packet-count') as HTMLElement).textContent = `${prog.receivedCount} / ${prog.totalPackets} (${prog.percent}%)`;
-    (this.container.querySelector('#rx-progress-bar') as HTMLElement).style.width = `${prog.percent}%`;
+    (this.container.querySelector('#metric-loop') as HTMLElement).textContent = `LOOP ${prog.loopCount}`;
+
+    if (prog.initialPickupIndex !== null) {
+      (this.container.querySelector('#metric-pickup') as HTMLElement).textContent = `PKT #${prog.initialPickupIndex}`;
+    }
+
+    // Render Segmented Canvas Progress Bar
+    this.renderSegmentedProgressBar(prog);
+
+    // Update Pickup Marker Position
+    const marker = this.container.querySelector('#pickup-marker') as HTMLElement;
+    const markerLabel = this.container.querySelector('#pickup-marker-label') as HTMLElement;
+    if (prog.initialPickupIndex !== null && prog.totalPackets > 0) {
+      marker.style.display = 'flex';
+      const pickupPct = (prog.initialPickupIndex / prog.totalPackets) * 100;
+      marker.style.left = `${Math.min(95, Math.max(5, pickupPct))}%`;
+      markerLabel.textContent = `PICKED UP AT PKT #${prog.initialPickupIndex}`;
+    }
+
+    // Update Head Gap Notice
+    const gapNotice = this.container.querySelector('#head-gap-notice') as HTMLElement;
+    const gapText = this.container.querySelector('#head-gap-text') as HTMLElement;
+    if (prog.missingHeadCount > 0 && prog.isWaitingForLoop) {
+      gapNotice.style.display = 'flex';
+      gapText.textContent = `Head gap: Packets #0–#${prog.initialPickupIndex! - 1} pending. Currently receiving rest of stream... will automatically complete in Loop 2!`;
+    } else {
+      gapNotice.style.display = 'none';
+    }
 
     // Render packet map grid
     const mapGrid = this.container.querySelector('#packet-map-grid') as HTMLElement;
@@ -412,38 +503,126 @@ export class ReceiverApp {
     });
   }
 
+  private renderSegmentedProgressBar(prog: ReassemblyProgress): void {
+    const canvas = this.container.querySelector('#segmented-progress-canvas') as HTMLCanvasElement;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const total = prog.totalPackets || 1;
+    const segWidth = w / total;
+
+    // Draw base track
+    ctx.fillStyle = '#10131a';
+    ctx.fillRect(0, 0, w, h);
+
+    // Draw individual segments
+    for (let i = 0; i < total; i++) {
+      const x = i * segWidth;
+      const isReceived = prog.receivedMap[i];
+
+      if (isReceived) {
+        ctx.fillStyle = '#00e676'; // Vibrant emerald
+        ctx.fillRect(x, 0, Math.ceil(segWidth), h);
+      } else {
+        // Empty / pending gap: subtle hatched or dark bar
+        ctx.fillStyle = '#181c26';
+        ctx.fillRect(x, 0, Math.ceil(segWidth), h);
+      }
+
+      // 1px segment divider if not too dense
+      if (total < 100) {
+        ctx.strokeStyle = '#0a0c10';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+      }
+    }
+
+    // Current pointer sweep line
+    if (prog.currentPacketIndex >= 0 && prog.totalPackets > 0) {
+      const curX = prog.currentPacketIndex * segWidth;
+      ctx.fillStyle = '#00e5ff';
+      ctx.fillRect(curX, 0, Math.max(3, segWidth), h);
+    }
+  }
+
   private handleComplete(res: ReassembledResult): void {
     soundManager.playCompletionChime();
 
-    const card = this.container.querySelector('#received-image-card') as HTMLElement;
-    const img = this.container.querySelector('#received-image-img') as HTMLImageElement;
-    const downloadBtn = this.container.querySelector('#btn-download-image') as HTMLAnchorElement;
-    const sizeBadge = this.container.querySelector('#res-size-badge') as HTMLElement;
-    const meta = this.container.querySelector('#received-card-meta') as HTMLElement;
+    // Hide gap notice
+    (this.container.querySelector('#head-gap-notice') as HTMLElement).style.display = 'none';
 
-    img.src = res.dataUrl;
-    downloadBtn.href = res.dataUrl;
-    downloadBtn.download = `lumalink_${res.sessionId.toString(16)}.webp`;
-    sizeBadge.textContent = `${(res.totalBytes / 1024).toFixed(1)} KB`;
+    if (res.isText) {
+      // Show Text Card
+      const textCard = this.container.querySelector('#received-text-card') as HTMLElement;
+      const textContent = this.container.querySelector('#received-text-content') as HTMLElement;
+      const textSizeBadge = this.container.querySelector('#res-text-size-badge') as HTMLElement;
+      const metaChars = this.container.querySelector('#text-meta-chars') as HTMLElement;
 
-    meta.innerHTML = `
-      <span>Resolution: ${res.width}×${res.height}</span>
-      <span>Packets: ${res.totalPackets}</span>
-      <span>ECC Corrections: ${res.totalCorrectedErrors}</span>
-      <span class="text-emerald">AES-GCM Authenticated ✓</span>
-    `;
+      textContent.textContent = res.textContent || '';
+      textSizeBadge.textContent = `${res.totalBytes} BYTES`;
+      metaChars.textContent = `${res.textContent?.length || 0} characters • Packets: ${res.totalPackets}`;
 
-    card.style.display = 'block';
-    card.scrollIntoView({ behavior: 'smooth' });
+      textCard.style.display = 'block';
+      textCard.scrollIntoView({ behavior: 'smooth' });
+    } else {
+      // Show Image Card (or Image+Caption)
+      const card = this.container.querySelector('#received-image-card') as HTMLElement;
+      const img = this.container.querySelector('#received-image-img') as HTMLImageElement;
+      const downloadBtn = this.container.querySelector('#btn-download-image') as HTMLAnchorElement;
+      const sizeBadge = this.container.querySelector('#res-size-badge') as HTMLElement;
+      const meta = this.container.querySelector('#received-card-meta') as HTMLElement;
+      const captionBox = this.container.querySelector('#received-caption-box') as HTMLElement;
+
+      if (res.dataUrl) {
+        img.src = res.dataUrl;
+        downloadBtn.href = res.dataUrl;
+        downloadBtn.download = `lumalink_${res.sessionId.toString(16)}.webp`;
+      }
+
+      sizeBadge.textContent = `${(res.totalBytes / 1024).toFixed(1)} KB`;
+
+      meta.innerHTML = `
+        <span>Resolution: ${res.width}×${res.height}</span>
+        <span>Packets: ${res.totalPackets}</span>
+        <span>ECC Corrections: ${res.totalCorrectedErrors}</span>
+        <span class="text-emerald">AES-GCM Authenticated ✓</span>
+      `;
+
+      if (res.hasCaption && res.captionText) {
+        captionBox.style.display = 'block';
+        captionBox.textContent = `Attached Caption: "${res.captionText}"`;
+      } else {
+        captionBox.style.display = 'none';
+      }
+
+      card.style.display = 'block';
+      card.scrollIntoView({ behavior: 'smooth' });
+    }
   }
 
   public resetState(): void {
     this.calibrator.reset();
     this.reassembler.reset();
-    (this.container.querySelector('#rx-progress-bar') as HTMLElement).style.width = '0%';
     (this.container.querySelector('#rx-packet-count') as HTMLElement).textContent = '0 / 0 (0%)';
     (this.container.querySelector('#packet-map-grid') as HTMLElement).innerHTML = '';
     (this.container.querySelector('#received-image-card') as HTMLElement).style.display = 'none';
+    (this.container.querySelector('#received-text-card') as HTMLElement).style.display = 'none';
+    (this.container.querySelector('#pickup-marker') as HTMLElement).style.display = 'none';
+    (this.container.querySelector('#head-gap-notice') as HTMLElement).style.display = 'none';
+    (this.container.querySelector('#rx-live-packet-idx') as HTMLElement).textContent = 'WAITING FOR FRAMES';
+    (this.container.querySelector('#rx-channel-status') as HTMLElement).textContent = 'STANDBY';
+
+    // Clear segmented progress canvas
+    const canvas = this.container.querySelector('#segmented-progress-canvas') as HTMLCanvasElement;
+    const ctx = canvas.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
   }
 
   public getPipeline(): VisionPipeline {

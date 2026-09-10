@@ -7,6 +7,7 @@ import {
   FrameType,
   MAX_PAYLOAD_SIZE,
   type FrameTypeValue,
+  type PayloadMimeType,
 } from '../protocol/types';
 import { FrameCodec } from '../protocol/frame';
 import { MatrixMapper } from './matrix';
@@ -15,9 +16,9 @@ import { crc32 } from '../protocol/crc32';
 
 export interface TransmissionSource {
   data: Uint8Array;
-  mimeType: 'image/webp' | 'image/jpeg';
-  width: number;
-  height: number;
+  mimeType: PayloadMimeType;
+  width?: number;
+  height?: number;
   encrypt?: boolean;
 }
 
@@ -25,6 +26,7 @@ export interface PreparedStream {
   sessionId: number;
   totalPackets: number;
   totalBytes: number;
+  mimeType: PayloadMimeType;
   frames: {
     type: FrameTypeValue;
     packetIndex: number;
@@ -91,13 +93,21 @@ export class PacketStreamGenerator {
     });
 
     // 3. START FRAME
-    // Format: totalBytes (4B), mime (1B: 1=webp, 2=jpeg), width (2B), height (2B), checksum (4B), iv (12B), key (16B) = 41B
+    // Format: totalBytes (4B), mimeCode (1B), width (2B), height (2B), checksum (4B), iv (12B), key (16B) = 41B
     const startPayload = new Uint8Array(41);
     const startView = new DataView(startPayload.buffer);
     startView.setUint32(0, source.data.length, false);
-    startPayload[4] = source.mimeType === 'image/webp' ? 1 : 2;
-    startView.setUint16(5, source.width, false);
-    startView.setUint16(7, source.height, false);
+
+    let mimeCode = 1;
+    if (source.mimeType === 'image/webp') mimeCode = 1;
+    else if (source.mimeType === 'image/jpeg') mimeCode = 2;
+    else if (source.mimeType === 'text/plain') mimeCode = 3;
+    else if (source.mimeType === 'application/json') mimeCode = 4;
+    else if (source.mimeType === 'multipart/image+text') mimeCode = 5;
+
+    startPayload[4] = mimeCode;
+    startView.setUint16(5, source.width || 0, false);
+    startView.setUint16(7, source.height || 0, false);
     startView.setUint32(9, rawChecksum, false);
     startPayload.set(iv, 13);
     startPayload.set(keyBytes, 25);
@@ -159,6 +169,7 @@ export class PacketStreamGenerator {
       sessionId,
       totalPackets,
       totalBytes: source.data.length,
+      mimeType: source.mimeType,
       frames,
     };
   }
