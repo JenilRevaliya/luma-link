@@ -7,6 +7,7 @@
 
 import type { Point2D, QuadCorners } from '../protocol/types';
 import { VisualFrameRenderer } from '../encoder/visual-frame';
+import { OneEuroQuadFilter } from './one-euro-filter';
 
 export interface DetectionResult {
   corners: QuadCorners;        // Fiducial marker center corners
@@ -44,17 +45,19 @@ interface CandidateCluster {
 export class CornerFinder {
   private static lastValidCorners: QuadCorners | null = null;
   private static lockStreak = 0;
-  private static lockDecay = 0; // Hysteresis decay memory (up to 15 frames)
+  private static lockDecay = 0; // Hysteresis decay memory (up to 35 frames)
+  private static quadFilter = new OneEuroQuadFilter();
 
   public static reset(): void {
     CornerFinder.lastValidCorners = null;
     CornerFinder.lockStreak = 0;
     CornerFinder.lockDecay = 0;
+    CornerFinder.quadFilter.reset();
   }
 
   /**
    * Locates optical transmission corners in camera image data using QR-standard
-   * 1:1:3:1:1 module scanlines and sub-pixel clustering
+   * 1:1:3:1:1 module scanlines, 1-Euro filtering, and sub-pixel clustering
    */
   public static findCorners(
     imgData: ImageData,
@@ -113,6 +116,16 @@ export class CornerFinder {
       const found = CornerFinder.scanForCandidates(data, width, height, sx, sy, sw, sh, threshold);
       candidates = candidates.concat(found);
       if (candidates.length >= 8) break; // Sufficient candidates acquired
+    }
+
+    // If searchBounds was provided but found fewer than 3 candidates,
+    // automatically expand search to the entire camera frame (crucial for non-fullscreen mode!)
+    if (candidates.length < 3 && (sx > 0 || sy > 0 || sw < width || sh < height)) {
+      for (const threshold of thresholds) {
+        const found = CornerFinder.scanForCandidates(data, width, height, 0, 0, width, height, threshold);
+        candidates = candidates.concat(found);
+        if (candidates.length >= 8) break;
+      }
     }
 
     // 3. Cluster candidates from adjacent scanlines
@@ -175,28 +188,19 @@ export class CornerFinder {
       );
     }
 
-    // 6. Apply Temporal Smoothing & Hysteresis
+    // 6. Apply One-Euro Quad Filtering & Sustained Lock Hysteresis
     if (resolvedCorners) {
-      CornerFinder.lockDecay = 15; // 15 frames (~500ms) memory across camera blurs
-      CornerFinder.lockStreak = Math.min(30, CornerFinder.lockStreak + 1);
+      CornerFinder.lockDecay = 35; // 35 frames (~1.2s) memory across camera blurs
+      CornerFinder.lockStreak = Math.min(50, CornerFinder.lockStreak + 1);
 
-      let finalCorners = resolvedCorners;
-      if (CornerFinder.lastValidCorners) {
-        // High-stability exponential moving average (80% memory / 20% measurement)
-        const alpha = 0.80;
-        finalCorners = {
-          topLeft: CornerFinder.lerpPoint(CornerFinder.lastValidCorners.topLeft, resolvedCorners.topLeft, alpha),
-          topRight: CornerFinder.lerpPoint(CornerFinder.lastValidCorners.topRight, resolvedCorners.topRight, alpha),
-          bottomRight: CornerFinder.lerpPoint(CornerFinder.lastValidCorners.bottomRight, resolvedCorners.bottomRight, alpha),
-          bottomLeft: CornerFinder.lerpPoint(CornerFinder.lastValidCorners.bottomLeft, resolvedCorners.bottomLeft, alpha),
-        };
-      }
+      // Adaptive One-Euro filtering removes jitter when stationary & eliminates lag when moving
+      const smoothed = CornerFinder.quadFilter.filter(resolvedCorners);
+      CornerFinder.lastValidCorners = smoothed;
 
-      CornerFinder.lastValidCorners = finalCorners;
       return {
-        corners: finalCorners,
-        matrixCorners: CornerFinder.computeMatrixCorners(finalCorners),
-        confidence: Math.min(0.99, 0.85 + CornerFinder.lockStreak * 0.01),
+        corners: smoothed,
+        matrixCorners: CornerFinder.computeMatrixCorners(smoothed),
+        confidence: Math.min(0.99, 0.88 + CornerFinder.lockStreak * 0.004),
         rotationOffset: 0,
         isDirectLock: true,
       };
@@ -625,6 +629,7 @@ export class CornerFinder {
     }
     CornerFinder.lastValidCorners = null;
     CornerFinder.lockStreak = 0;
+    CornerFinder.quadFilter.reset();
     return null;
   }
 
@@ -646,13 +651,6 @@ export class CornerFinder {
     const py = Math.max(0, Math.min(height - 1, Math.round(y)));
     const idx = (py * width + px) * 4;
     return { r: data[idx], g: data[idx + 1], b: data[idx + 2] };
-  }
-
-  private static lerpPoint(p1: Point2D, p2: Point2D, alpha: number): Point2D {
-    return {
-      x: p1.x * alpha + p2.x * (1 - alpha),
-      y: p1.y * alpha + p2.y * (1 - alpha),
-    };
   }
 
   private static bilinearInterpolate(q: QuadCorners, u: number, v: number): Point2D {
@@ -680,6 +678,19 @@ export class CornerFinder {
       topRight: CornerFinder.bilinearInterpolate(corners, mEnd, mStart),
       bottomRight: CornerFinder.bilinearInterpolate(corners, mEnd, mEnd),
       bottomLeft: CornerFinder.bilinearInterpolate(corners, mStart, mEnd),
+    };
+  }
+
+  /**
+   * Scales quad corner coordinates by a scaling factor
+   */
+  public static scaleQuad(q: QuadCorners, scale: number): QuadCorners {
+    if (scale === 1.0) return q;
+    return {
+      topLeft: { x: q.topLeft.x * scale, y: q.topLeft.y * scale },
+      topRight: { x: q.topRight.x * scale, y: q.topRight.y * scale },
+      bottomRight: { x: q.bottomRight.x * scale, y: q.bottomRight.y * scale },
+      bottomLeft: { x: q.bottomLeft.x * scale, y: q.bottomLeft.y * scale },
     };
   }
 

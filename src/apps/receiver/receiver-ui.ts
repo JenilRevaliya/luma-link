@@ -28,6 +28,8 @@ export class ReceiverApp {
   private frameCounter = 0;
   private measuredFps = 0;
   private lastFpsCalcTime = 0;
+  private procScale = 1.0;
+  private lastDecodedPacketTime = 0;
 
   // External simulated frame provider for loopback simulator
   public externalFrameProvider?: () => ImageData | null;
@@ -388,13 +390,24 @@ export class ReceiverApp {
       if (this.externalCornersProvider) {
         overrideCorners = this.externalCornersProvider();
       }
+      this.procScale = 1.0;
     } else if (this.videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       const vw = this.videoEl.videoWidth || 640;
       const vh = this.videoEl.videoHeight || 480;
 
-      if (this.cameraCanvas.width !== vw || this.cameraCanvas.height !== vh) {
-        this.cameraCanvas.width = vw;
-        this.cameraCanvas.height = vh;
+      // Downsample processing resolution to max 640px dimension for ultra-fast mobile WebKit throughput (45-60 FPS)
+      // while keeping reticleCanvas at full video resolution for crystal-sharp HUD overlay rendering
+      const MAX_PROC_DIM = 640;
+      const maxVideoDim = Math.max(vw, vh);
+      this.procScale = maxVideoDim > MAX_PROC_DIM ? MAX_PROC_DIM / maxVideoDim : 1.0;
+      const procW = Math.round(vw * this.procScale);
+      const procH = Math.round(vh * this.procScale);
+
+      if (this.cameraCanvas.width !== procW || this.cameraCanvas.height !== procH) {
+        this.cameraCanvas.width = procW;
+        this.cameraCanvas.height = procH;
+      }
+      if (this.reticleCanvas.width !== vw || this.reticleCanvas.height !== vh) {
         this.reticleCanvas.width = vw;
         this.reticleCanvas.height = vh;
         const wrapper = this.container.querySelector('.camera-viewport-wrapper') as HTMLElement | null;
@@ -405,26 +418,26 @@ export class ReceiverApp {
 
       const ctx = this.cameraCanvas.getContext('2d', { willReadFrequently: true });
       if (ctx) {
-        ctx.drawImage(this.videoEl, 0, 0, vw, vh);
-        imgData = ctx.getImageData(0, 0, vw, vh);
+        ctx.drawImage(this.videoEl, 0, 0, procW, procH);
+        imgData = ctx.getImageData(0, 0, procW, procH);
       }
     }
 
     if (!imgData) return;
 
-    // Calculate targeting reticle bounds in camera image coordinates
+    // Calculate targeting reticle bounds in processing image coordinates
     let searchBounds: { x: number; y: number; width: number; height: number } | undefined = undefined;
     const viewportWrapper = this.container.querySelector('.camera-viewport-wrapper') as HTMLElement | null;
     const reticleEl = this.container.querySelector('#targeting-reticle') as HTMLElement | null;
 
     if (viewportWrapper && reticleEl && !overrideCorners) {
-      const vw = this.cameraCanvas.width;
-      const vh = this.cameraCanvas.height;
+      const cw = this.cameraCanvas.width;
+      const ch = this.cameraCanvas.height;
       const wrapperRect = viewportWrapper.getBoundingClientRect();
       const reticleRect = reticleEl.getBoundingClientRect();
 
       if (wrapperRect.width > 0 && wrapperRect.height > 0) {
-        const videoAspect = vw / vh;
+        const videoAspect = cw / ch;
         const wrapperAspect = wrapperRect.width / wrapperRect.height;
         let displayedW: number;
         let displayedH: number;
@@ -448,17 +461,17 @@ export class ReceiverApp {
           displayedT = (wrapperRect.height - displayedH) / 2;
         }
 
-        const scale = vw / displayedW;
+        const scale = cw / displayedW;
         const rx = (reticleRect.left - (wrapperRect.left + displayedL)) * scale;
         const ry = (reticleRect.top - (wrapperRect.top + displayedT)) * scale;
         const rw = reticleRect.width * scale;
         const rh = reticleRect.height * scale;
 
         const pad = Math.round(Math.min(rw, rh) * 0.25);
-        const clampedX = Math.max(0, Math.min(vw - 20, Math.round(rx - pad)));
-        const clampedY = Math.max(0, Math.min(vh - 20, Math.round(ry - pad)));
-        const clampedW = Math.min(vw - clampedX, Math.max(20, Math.round(rw + 2 * pad)));
-        const clampedH = Math.min(vh - clampedY, Math.max(20, Math.round(rh + 2 * pad)));
+        const clampedX = Math.max(0, Math.min(cw - 20, Math.round(rx - pad)));
+        const clampedY = Math.max(0, Math.min(ch - 20, Math.round(ry - pad)));
+        const clampedW = Math.min(cw - clampedX, Math.max(20, Math.round(rw + 2 * pad)));
+        const clampedH = Math.min(ch - clampedY, Math.max(20, Math.round(rh + 2 * pad)));
 
         searchBounds = {
           x: clampedX,
@@ -486,11 +499,15 @@ export class ReceiverApp {
     (this.container.querySelector('#metric-calibrated') as HTMLElement).textContent = this.calibrator.isCalibrated ? 'YES' : 'PENDING';
     (this.container.querySelector('#metric-confidence') as HTMLElement).textContent = `${Math.round(result.averageConfidence * 100)}%`;
 
-    // Draw reticle tracking overlay (framed around matrixCorners)
-    this.drawReticleOverlay(result.corners, result.matrixCorners);
+    // Draw reticle tracking overlay (scaled to full video reticleCanvas dimensions)
+    const displayScale = 1.0 / this.procScale;
+    const displayCorners = result.corners ? CornerFinder.scaleQuad(result.corners, displayScale) : null;
+    const displayMatrixCorners = result.matrixCorners ? CornerFinder.scaleQuad(result.matrixCorners, displayScale) : null;
+    this.drawReticleOverlay(displayCorners, displayMatrixCorners, displayScale);
 
     // If valid frame was decoded, update live telemetry and ingest
     if (result.decodedFrame) {
+      this.lastDecodedPacketTime = performance.now();
       const hdr = result.decodedFrame.header;
       const pktDesc = `PKT #${hdr.packetIndex} / ${hdr.totalPackets} (SEQ: ${hdr.sequenceNum})`;
       (this.container.querySelector('#rx-live-packet-idx') as HTMLElement).textContent = pktDesc;
@@ -506,7 +523,7 @@ export class ReceiverApp {
     }
   }
 
-  private drawReticleOverlay(corners: QuadCorners | null, matrixCorners: QuadCorners | null): void {
+  private drawReticleOverlay(corners: QuadCorners | null, matrixCorners: QuadCorners | null, displayScale = 1.0): void {
     const ctx = this.reticleCanvas.getContext('2d');
     if (!ctx) return;
 
@@ -591,7 +608,7 @@ export class ReceiverApp {
             const v = matrixInset + (r + 0.5) * cellSize;
             const pt = H.transform(u, v);
             ctx.beginPath();
-            ctx.arc(pt.x, pt.y, 1.8, 0, Math.PI * 2);
+            ctx.arc(pt.x * displayScale, pt.y * displayScale, 1.8, 0, Math.PI * 2);
             ctx.fill();
           }
         }
@@ -606,9 +623,13 @@ export class ReceiverApp {
     const text = this.container.querySelector('#rx-state-text') as HTMLElement;
     const hint = this.container.querySelector('#reticle-hint') as HTMLElement;
 
+    const now = performance.now();
+    // Sustained streaming grace period (1.5s) eliminates rapid status flickering between frames
+    const isActivelyStreaming = isTransmitting || (now - this.lastDecodedPacketTime < 1500);
+
     dot.className = 'status-dot';
 
-    if (isTransmitting) {
+    if (isActivelyStreaming) {
       dot.classList.add('status-active');
       text.textContent = 'TRANSMISSION IN PROGRESS';
       hint.textContent = 'OPTICAL STREAM SYNCHRONIZED';
@@ -808,6 +829,7 @@ export class ReceiverApp {
     CornerFinder.reset();
     this.calibrator.reset();
     this.reassembler.reset();
+    this.lastDecodedPacketTime = 0;
     (this.container.querySelector('#rx-packet-count') as HTMLElement).textContent = '0 / 0 (0%)';
     (this.container.querySelector('#packet-map-grid') as HTMLElement).innerHTML = '';
     (this.container.querySelector('#received-image-card') as HTMLElement).style.display = 'none';

@@ -26,7 +26,7 @@ export class SenderApp {
   // Text state
   private currentText = '';
 
-  private fps = 12;
+  private fps = 10;
   private preparedStream: PreparedStream | null = null;
   private currentFrameIndex = 0;
   private loopCount = 1;
@@ -151,10 +151,10 @@ export class SenderApp {
               </div>
               <input type="range" class="range-slider" id="fps-slider" min="4" max="30" value="${this.fps}" step="1" />
               <div class="presets-row" style="margin-top: 0.4rem;">
-                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="8">8 FPS</button>
-                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="12">12 FPS (Optimal)</button>
-                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="15">15 FPS (Turbo)</button>
-                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="20">20 FPS (Max)</button>
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="8">8 FPS (Safe)</button>
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="10">10 FPS (Optimal)</button>
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="12">12 FPS (Turbo)</button>
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="15">15 FPS (Max)</button>
               </div>
             </div>
 
