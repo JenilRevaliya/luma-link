@@ -9,6 +9,7 @@ import { ImageCompressor } from '../../packages/image/compressor';
 import { PacketStreamGenerator, type PreparedStream } from '../../packages/encoder/stream';
 import { SAMPLE_PRESETS, SAMPLE_TEXT_PRESETS } from '../../components/sample-images';
 import { FrameType, type PayloadMimeType } from '../../packages/protocol/types';
+import { debugLogger } from '../../packages/debug/debug-logger';
 
 export type SenderInputMode = 'photo' | 'text' | 'photo-caption';
 
@@ -25,7 +26,7 @@ export class SenderApp {
   // Text state
   private currentText = '';
 
-  private fps = 24;
+  private fps = 10;
   private preparedStream: PreparedStream | null = null;
   private currentFrameIndex = 0;
   private loopCount = 1;
@@ -147,7 +148,13 @@ export class SenderApp {
                 <label class="control-label">Modulation Rate (FPS)</label>
                 <span class="slider-value" id="fps-display">${this.fps} FPS</span>
               </div>
-              <input type="range" class="range-slider" id="fps-slider" min="10" max="60" value="${this.fps}" step="2" />
+              <input type="range" class="range-slider" id="fps-slider" min="4" max="30" value="${this.fps}" step="1" />
+              <div class="presets-row" style="margin-top: 0.4rem;">
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="5">5 FPS (Reliable)</button>
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="10">10 FPS (Standard)</button>
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="15">15 FPS</button>
+                <button class="btn btn-xs btn-outline fps-preset-btn" data-fps="24">24 FPS</button>
+              </div>
             </div>
 
             <div class="control-group" id="group-quality-slider">
@@ -186,6 +193,9 @@ export class SenderApp {
             </button>
             <button class="btn btn-outline btn-lg" id="btn-pause-tx" disabled>
               ❚❚ PAUSE
+            </button>
+            <button class="btn btn-outline" id="btn-step-tx" disabled title="Step 1 optical frame at a time to test camera locking without motion blur">
+              ⏭ STEP FRAME
             </button>
             <button class="btn btn-ghost" id="btn-fullscreen">
               ⛶ FULLSCREEN
@@ -360,13 +370,26 @@ export class SenderApp {
       this.processAndPrepare();
     });
 
+    // FPS Presets
+    this.container.querySelectorAll<HTMLButtonElement>('.fps-preset-btn').forEach((b) => {
+      b.addEventListener('click', () => {
+        const val = parseInt(b.getAttribute('data-fps') || '10', 10);
+        this.fps = val;
+        fpsSlider.value = String(val);
+        fpsDisplay.textContent = `${val} FPS`;
+        debugLogger.info('TX', `Modulation rate switched to ${val} FPS`);
+      });
+    });
+
     // Buttons
     const startBtn = this.container.querySelector('#btn-start-tx') as HTMLButtonElement;
     const pauseBtn = this.container.querySelector('#btn-pause-tx') as HTMLButtonElement;
+    const stepBtn = this.container.querySelector('#btn-step-tx') as HTMLButtonElement;
     const fullBtn = this.container.querySelector('#btn-fullscreen') as HTMLButtonElement;
 
     startBtn.addEventListener('click', () => this.startTransmission());
     pauseBtn.addEventListener('click', () => this.pauseTransmission());
+    stepBtn.addEventListener('click', () => this.stepFrame());
 
     fullBtn.addEventListener('click', () => {
       const wrapper = this.container.querySelector('#canvas-wrapper') as HTMLElement;
@@ -525,9 +548,26 @@ export class SenderApp {
 
     (this.container.querySelector('#session-badge') as HTMLElement).textContent = `SESSION: #${this.preparedStream.sessionId.toString(16).toUpperCase()}`;
 
-    // Enable Start button
+    // Enable Start & Step buttons
     const startBtn = this.container.querySelector('#btn-start-tx') as HTMLButtonElement;
+    const stepBtn = this.container.querySelector('#btn-step-tx') as HTMLButtonElement;
     startBtn.disabled = false;
+    stepBtn.disabled = false;
+
+    debugLogger.success('TX', `Prepared optical stream session #${this.preparedStream.sessionId.toString(16).toUpperCase()} (${this.preparedStream.totalPackets} pkts, ${payloadBytes.length} bytes, ${mimeType})`);
+
+    debugLogger.updateSenderTelemetry({
+      isTransmitting: false,
+      fps: this.fps,
+      currentFrameIndex: 0,
+      totalFrames: this.preparedStream.frames.length,
+      loopCount: this.loopCount,
+      sessionId: this.preparedStream.sessionId,
+      totalPackets: this.preparedStream.totalPackets,
+      payloadBytes: payloadBytes.length,
+      mimeType,
+      lastFrameType: 'DISCOVERY',
+    });
 
     // Render initial discovery/idle frame
     if (this.preparedStream.frames.length > 0) {
@@ -543,6 +583,9 @@ export class SenderApp {
     (this.container.querySelector('#btn-pause-tx') as HTMLButtonElement).disabled = false;
     (this.container.querySelector('#tx-status-dot') as HTMLElement).classList.add('status-active');
 
+    debugLogger.info('TX', `Optical transmission active at ${this.fps} FPS (Interval: ${(1000 / this.fps).toFixed(0)} ms/frame)`);
+    debugLogger.updateSenderTelemetry({ isTransmitting: true });
+
     this.lastFrameTime = performance.now();
     this.tick();
   }
@@ -556,6 +599,22 @@ export class SenderApp {
     (this.container.querySelector('#btn-start-tx') as HTMLButtonElement).disabled = false;
     (this.container.querySelector('#btn-pause-tx') as HTMLButtonElement).disabled = true;
     (this.container.querySelector('#tx-status-dot') as HTMLElement).classList.remove('status-active');
+
+    debugLogger.info('TX', `Optical transmission paused at frame #${this.currentFrameIndex}`);
+    debugLogger.updateSenderTelemetry({ isTransmitting: false });
+  }
+
+  public stepFrame(): void {
+    if (!this.preparedStream) return;
+
+    if (this.isTransmitting) {
+      this.pauseTransmission();
+    }
+
+    this.renderNextFrame();
+    const prevIdx = (this.currentFrameIndex - 1 + this.preparedStream.frames.length) % this.preparedStream.frames.length;
+    const f = this.preparedStream.frames[prevIdx];
+    debugLogger.info('TX', `Stepped single frame #${prevIdx}/${this.preparedStream.frames.length} (Type: ${f.type})`);
   }
 
   private tick(): void {
@@ -603,12 +662,19 @@ export class SenderApp {
     const bitrate = ((512 * this.fps) / 1000).toFixed(1);
     (this.container.querySelector('#telemetry-bitrate') as HTMLElement).textContent = `${bitrate} kbps`;
 
+    debugLogger.updateSenderTelemetry({
+      currentFrameIndex: this.currentFrameIndex,
+      lastFrameType: `${typeStr} (#${frame.packetIndex})`,
+    });
+
     // Advance frame index
     this.currentFrameIndex++;
     if (this.currentFrameIndex >= this.preparedStream.frames.length) {
       this.currentFrameIndex = 0;
       this.loopCount++;
       (this.container.querySelector('#loop-badge') as HTMLElement).textContent = `LOOP ${this.loopCount}`;
+      debugLogger.info('TX', `Completed stream loop #${this.loopCount - 1}. Looping back to frame 0.`);
+      debugLogger.updateSenderTelemetry({ loopCount: this.loopCount });
     }
   }
 

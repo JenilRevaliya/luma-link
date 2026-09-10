@@ -108,6 +108,7 @@ export class CornerFinder {
 
   /**
    * Searches for a high-contrast concentric target centroid around an expected point
+   * Uses adaptive two-pass contrast thresholding to isolate bright ring under any camera exposure
    */
   private static findFiducialCentroid(
     data: Uint8ClampedArray,
@@ -121,26 +122,39 @@ export class CornerFinder {
     const minY = Math.max(0, Math.round(center.y - radius));
     const maxY = Math.min(height - 1, Math.round(center.y + radius));
 
+    // 1st pass: find local luminance dynamic range in this quadrant
+    let minLuma = 255;
+    let maxLuma = 0;
+
+    for (let y = minY; y <= maxY; y += 3) {
+      for (let x = minX; x <= maxX; x += 3) {
+        const idx = (y * width + x) * 4;
+        const luma = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+        if (luma < minLuma) minLuma = luma;
+        if (luma > maxLuma) maxLuma = luma;
+      }
+    }
+
+    const contrast = maxLuma - minLuma;
+    if (contrast < 24) return null;
+
+    // Adaptive threshold: top 35% brightest pixels in this local window
+    const threshold = minLuma + contrast * 0.65;
+
     let sumX = 0;
     let sumY = 0;
     let totalWeight = 0;
 
-    // Sample pixels in local window
+    // 2nd pass: sample pixels exceeding threshold
     for (let y = minY; y <= maxY; y += 2) {
       for (let x = minX; x <= maxX; x += 2) {
         const idx = (y * width + x) * 4;
-        const r = data[idx];
-        const g = data[idx + 1];
-        const b = data[idx + 2];
+        const luma = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
 
-        const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-
-        // The fiducial features a bright white ring and cyan/white bullseye (high luminance)
-        if (luma > 150) {
-          // Weight towards proximity to center and brightness
+        if (luma > threshold) {
           const d = Math.hypot(x - center.x, y - center.y);
           const spatialWeight = Math.max(0.1, 1 - d / radius);
-          const weight = (luma - 150) * spatialWeight;
+          const weight = (luma - threshold) * spatialWeight;
 
           sumX += x * weight;
           sumY += y * weight;
@@ -149,7 +163,7 @@ export class CornerFinder {
       }
     }
 
-    if (totalWeight < 100) return null;
+    if (totalWeight < 50) return null;
 
     return {
       x: sumX / totalWeight,

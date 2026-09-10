@@ -5,6 +5,7 @@
 import { SenderApp } from './apps/sender/sender-ui';
 import { ReceiverApp } from './apps/receiver/receiver-ui';
 import { DiagnosticsApp } from './apps/benchmark/diagnostics-ui';
+import { DebugTerminal } from './components/debug-terminal';
 
 class AppCoordinator {
   private appRoot: HTMLElement;
@@ -15,6 +16,7 @@ class AppCoordinator {
   private senderApp!: SenderApp;
   private receiverApp!: ReceiverApp;
   private diagnosticsApp!: DiagnosticsApp;
+  private debugTerminal!: DebugTerminal;
 
   private currentTab = 'sender';
 
@@ -55,6 +57,18 @@ class AppCoordinator {
       this.receiverApp
     );
     this.diagnosticsApp.render();
+
+    // 3. Instantiate and wire Debug Terminal
+    this.debugTerminal = new DebugTerminal();
+    this.debugTerminal.setApps(this.receiverApp, this.senderApp);
+
+    // Wire header debug button
+    const headerDebugBtn = document.getElementById('header-btn-debug');
+    if (headerDebugBtn) {
+      headerDebugBtn.addEventListener('click', () => {
+        this.debugTerminal.toggle();
+      });
+    }
   }
 
   private bindNavigation(): void {

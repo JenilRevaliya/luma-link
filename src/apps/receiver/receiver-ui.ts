@@ -9,6 +9,7 @@ import { ColorCalibrator } from '../../packages/calibration/color-calib';
 import { PacketReassembler, type ReassembledResult, type ReassemblyProgress } from '../../packages/decoder/reassembler';
 import { soundManager } from '../../components/audio-cues';
 import type { Point2D, QuadCorners } from '../../packages/protocol/types';
+import { debugLogger } from '../../packages/debug/debug-logger';
 
 export class ReceiverApp {
   private container: HTMLElement;
@@ -243,6 +244,27 @@ export class ReceiverApp {
   }
 
   public async startCamera(): Promise<void> {
+    debugLogger.info('CAM', 'Requesting rear camera access (ideal: 1280x720 @ 60FPS)...');
+
+    const isSecure = typeof window !== 'undefined' ? window.isSecureContext : false;
+    if (!isSecure) {
+      debugLogger.warn('SYS', `Running on insecure context (${window.location.origin}). Mobile browsers block camera on plain HTTP!`);
+    }
+
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      const errReason = !isSecure
+        ? 'INSECURE CONTEXT (HTTP): Mobile browsers restrict camera to HTTPS or localhost.'
+        : 'navigator.mediaDevices.getUserMedia is unavailable in this browser.';
+      debugLogger.error('CAM', `Camera API unavailable: ${errReason}`);
+      (this.container.querySelector('#rx-state-text') as HTMLElement).textContent = !isSecure
+        ? 'CAMERA BLOCKED: REQUIRES HTTPS (OR LOCALHOST)'
+        : 'CAMERA API UNAVAILABLE';
+      if (this.externalFrameProvider) {
+        this.startProcessingLoop();
+      }
+      return;
+    }
+
     try {
       const constraints: MediaStreamConstraints = {
         video: {
@@ -269,11 +291,29 @@ export class ReceiverApp {
       (this.container.querySelector('#btn-start-cam') as HTMLButtonElement).disabled = true;
       (this.container.querySelector('#btn-stop-cam') as HTMLButtonElement).disabled = false;
 
+      debugLogger.success('CAM', `Rear camera initialized: ${w}x${h} @ ${rate} (Facing: ${settings.facingMode || 'environment'})`);
+      debugLogger.updateReceiverTelemetry({
+        isRunning: true,
+        cameraResolution: `${w}x${h} (${rate})`,
+        measuredFps: parseInt(rate, 10) || 60,
+      });
+
       this.startProcessingLoop();
-    } catch (err) {
-      console.warn('Camera initiation fallback:', err);
-      (this.container.querySelector('#rx-state-text') as HTMLElement).textContent = 'CAMERA ACCESS BLOCKED / UNAVAILABLE';
+    } catch (err: any) {
+      const errName = err?.name || 'Error';
+      const errMsg = err?.message || String(err);
+      debugLogger.error('CAM', `Camera access rejected: [${errName}] ${errMsg}`, {
+        name: errName,
+        isSecureContext: isSecure,
+        origin: window.location.origin,
+      });
+
+      (this.container.querySelector('#rx-state-text') as HTMLElement).textContent = !isSecure
+        ? 'CAMERA BLOCKED: REQUIRES HTTPS (OR LOCALHOST)'
+        : `CAMERA ERROR: ${errName.toUpperCase()}`;
+
       if (this.externalFrameProvider) {
+        debugLogger.info('CAM', 'Falling back to external virtual frame provider');
         this.startProcessingLoop();
       }
     }
@@ -295,6 +335,9 @@ export class ReceiverApp {
     (this.container.querySelector('#btn-stop-cam') as HTMLButtonElement).disabled = true;
     (this.container.querySelector('#rx-status-dot') as HTMLElement).className = 'status-dot';
     (this.container.querySelector('#rx-state-text') as HTMLElement).textContent = 'CAMERA STOPPED';
+
+    debugLogger.info('CAM', 'Camera stopped by user');
+    debugLogger.updateReceiverTelemetry({ isRunning: false });
   }
 
   public startProcessingLoop(): void {
@@ -402,6 +445,13 @@ export class ReceiverApp {
     // Update state badge & channel indicator
     this.updateStateUI(result.state, result.decodedFrame !== null);
 
+    debugLogger.updateReceiverTelemetry({
+      measuredFps: this.measuredFps,
+      state: result.state,
+      confidence: result.averageConfidence,
+      isCalibrated: this.calibrator.isCalibrated,
+    });
+
     // Update channel metrics
     (this.container.querySelector('#metric-calibrated') as HTMLElement).textContent = this.calibrator.isCalibrated ? 'YES' : 'PENDING';
     (this.container.querySelector('#metric-confidence') as HTMLElement).textContent = `${Math.round(result.averageConfidence * 100)}%`;
@@ -412,9 +462,14 @@ export class ReceiverApp {
     // If valid frame was decoded, update live telemetry and ingest
     if (result.decodedFrame) {
       const hdr = result.decodedFrame.header;
-      (this.container.querySelector('#rx-live-packet-idx') as HTMLElement).textContent =
-        `PKT #${hdr.packetIndex} / ${hdr.totalPackets} (SEQ: ${hdr.sequenceNum})`;
+      const pktDesc = `PKT #${hdr.packetIndex} / ${hdr.totalPackets} (SEQ: ${hdr.sequenceNum})`;
+      (this.container.querySelector('#rx-live-packet-idx') as HTMLElement).textContent = pktDesc;
       (this.container.querySelector('#rx-channel-status') as HTMLElement).textContent = 'STREAMING ACTIVE ✓';
+
+      debugLogger.success('RX', `Decoded ${pktDesc} [Session #${hdr.sessionId.toString(16).toUpperCase()}] (RS: ${result.decodedFrame.correctedErrors} errs)`);
+      debugLogger.updateReceiverTelemetry({
+        lastDecodedPacket: pktDesc,
+      });
 
       this.reassembler.ingestFrame(result.decodedFrame);
       soundManager.playPacketTick();
@@ -538,6 +593,12 @@ export class ReceiverApp {
     (this.container.querySelector('#rx-packet-count') as HTMLElement).textContent = `${prog.receivedCount} / ${prog.totalPackets} (${prog.percent}%)`;
     (this.container.querySelector('#metric-loop') as HTMLElement).textContent = `LOOP ${prog.loopCount}`;
 
+    debugLogger.updateReceiverTelemetry({
+      receivedPacketsCount: prog.receivedCount,
+      totalPackets: prog.totalPackets,
+      missingPacketsCount: Math.max(0, prog.totalPackets - prog.receivedCount),
+    });
+
     if (prog.initialPickupIndex !== null) {
       (this.container.querySelector('#metric-pickup') as HTMLElement).textContent = `PKT #${prog.initialPickupIndex}`;
     }
@@ -637,6 +698,7 @@ export class ReceiverApp {
 
   private handleComplete(res: ReassembledResult): void {
     soundManager.playCompletionChime();
+    debugLogger.success('RX', `✓ RECONSTRUCTION COMPLETE! Decrypted ${res.data.length} bytes (Session #${res.sessionId.toString(16).toUpperCase()}, ECC: ${res.totalCorrectedErrors} corrections)`);
 
     // Hide gap notice
     (this.container.querySelector('#head-gap-notice') as HTMLElement).style.display = 'none';
@@ -710,5 +772,9 @@ export class ReceiverApp {
 
   public getPipeline(): VisionPipeline {
     return this.pipeline;
+  }
+
+  public getCalibrator(): ColorCalibrator {
+    return this.calibrator;
   }
 }

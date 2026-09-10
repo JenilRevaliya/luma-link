@@ -120,4 +120,110 @@ export class FrameCodec {
       rawBytes: buffer,
     };
   }
+
+  /**
+   * Diagnostically inspects a raw frame buffer, evaluating RS ECC, magic bytes, and CRC32
+   */
+  public static inspectFrame(rawBytes: Uint8Array): FrameInspection {
+    if (rawBytes.length !== TOTAL_FRAME_BYTES) {
+      return {
+        isValid: false,
+        length: rawBytes.length,
+        magicMatch: false,
+        magicHex: 'N/A',
+        versionMatch: false,
+        version: 0,
+        rsCorrectedErrors: -1,
+        crcMatch: false,
+        storedCrcHex: '0x0',
+        calcCrcHex: '0x0',
+        summary: `Invalid frame byte length: ${rawBytes.length} (expected ${TOTAL_FRAME_BYTES})`,
+      };
+    }
+
+    const buffer = new Uint8Array(rawBytes);
+    const rsErrors = rsCodec.decode(buffer);
+    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+
+    const m0 = buffer[0];
+    const m1 = buffer[1];
+    const ver = buffer[2];
+    const magicMatch = m0 === MAGIC_0 && m1 === MAGIC_1;
+    const versionMatch = ver === PROTOCOL_VERSION;
+    const magicHex = `0x${m0.toString(16).padStart(2, '0')} 0x${m1.toString(16).padStart(2, '0')}`;
+
+    const storedCrc = view.getUint32(HEADER_SIZE + MAX_PAYLOAD_SIZE, false);
+    const calcCrc = crc32(buffer, 0, HEADER_SIZE + MAX_PAYLOAD_SIZE);
+    const crcMatch = storedCrc === calcCrc;
+    const storedCrcHex = `0x${(storedCrc >>> 0).toString(16).padStart(8, '0').toUpperCase()}`;
+    const calcCrcHex = `0x${(calcCrc >>> 0).toString(16).padStart(8, '0').toUpperCase()}`;
+
+    const typeNames: Record<number, string> = {
+      1: 'DISCOVERY',
+      2: 'CALIBRATION',
+      3: 'START',
+      4: 'DATA',
+      5: 'END',
+    };
+
+    const typeCode = buffer[3] as FrameTypeValue;
+    const typeName = typeNames[typeCode] || `TYPE_${typeCode}`;
+
+    let summary = '';
+    const isValid = magicMatch && versionMatch && crcMatch && rsErrors >= 0;
+
+    if (isValid) {
+      summary = `VALID ${typeName} frame (Pkt #${buffer[7]}/${buffer[8]}, Session #${view.getUint16(4, false).toString(16).toUpperCase()}, RS: ${rsErrors} errs)`;
+    } else if (rsErrors < 0) {
+      summary = `CORRUPT: RS ECC failed (>4 byte errors, uncorrectable)`;
+    } else if (!magicMatch) {
+      summary = `NO MAGIC: found [${magicHex}], expected [0x4C 0x4D] ('LM')`;
+    } else if (!crcMatch) {
+      summary = `CRC MISMATCH: stored ${storedCrcHex} != calc ${calcCrcHex} (RS corrected: ${rsErrors})`;
+    } else if (!versionMatch) {
+      summary = `VERSION MISMATCH: got ${ver}, expected ${PROTOCOL_VERSION}`;
+    }
+
+    return {
+      isValid,
+      length: buffer.length,
+      magicMatch,
+      magicHex,
+      versionMatch,
+      version: ver,
+      rsCorrectedErrors: rsErrors,
+      crcMatch,
+      storedCrcHex,
+      calcCrcHex,
+      frameType: typeCode,
+      frameTypeName: typeName,
+      sessionId: view.getUint16(4, false),
+      sequenceNum: buffer[6],
+      packetIndex: buffer[7],
+      totalPackets: buffer[8],
+      payloadLength: buffer[9],
+      summary,
+    };
+  }
+}
+
+export interface FrameInspection {
+  isValid: boolean;
+  length: number;
+  magicMatch: boolean;
+  magicHex: string;
+  versionMatch: boolean;
+  version: number;
+  rsCorrectedErrors: number;
+  crcMatch: boolean;
+  storedCrcHex: string;
+  calcCrcHex: string;
+  frameType?: FrameTypeValue;
+  frameTypeName?: string;
+  sessionId?: number;
+  sequenceNum?: number;
+  packetIndex?: number;
+  totalPackets?: number;
+  payloadLength?: number;
+  summary: string;
 }
